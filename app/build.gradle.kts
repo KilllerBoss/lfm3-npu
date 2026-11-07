@@ -11,8 +11,8 @@ android {
         applicationId = "ai.liquid.lfm3"
         minSdk = 31
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.4.0"
+        versionCode = 8
+        versionName = "1.4.1"
         ndk {
             abiFilters += "arm64-v8a"
         }

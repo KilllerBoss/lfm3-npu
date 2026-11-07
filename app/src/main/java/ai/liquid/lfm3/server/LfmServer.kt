@@ -287,6 +287,11 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
 
     // ================================================================ Decide-API (d1)
 
+    /** Max. State-Länge (Zeichen) – schützt Speicher & Kontext (d1: 128k-Tokens-Limit). */
+    private val MAX_STATE_CHARS = 24_000
+    /** Max. Bilder pro Decision (d1 concatVision). */
+    private val MAX_DECIDE_IMAGES = 6
+
     /**
      * POST /v1/decide – System-One-Fragen über ein d1-Modell (ein Forward-Pass):
      * {"state": "…" | null, "image": "data:image/…;base64,…", "images": [...],
@@ -309,11 +314,18 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
             ?: return jsonError(400, "'questions' (Objekt) fehlt: " +
                 "{\"name\": {\"type\": \"box\", \"instructions\": \"Wo ist …?\"}}")
         val state = if (req.has("state") && !req.isNull("state")) req.optString("state") else null
+        if (state != null && state.length > MAX_STATE_CHARS) {
+            return jsonError(400, "State ist zu lang: ${state.length} Zeichen (Maximum $MAX_STATE_CHARS). " +
+                "Bitte kürzen – d1 packt State + Fragen in einen Forward-Pass.")
+        }
         val images = ArrayList<Bitmap>()
         val urls = ArrayList<String>()
         if (req.has("image") && !req.isNull("image")) urls.add(req.optString("image"))
         req.optJSONArray("images")?.let { arr ->
             for (i in 0 until arr.length()) urls.add(arr.optString(i))
+        }
+        if (urls.size > MAX_DECIDE_IMAGES) {
+            return jsonError(400, "Zu viele Bilder: ${urls.size} (Maximum $MAX_DECIDE_IMAGES pro Decision)")
         }
         for (u in urls) {
             val bmp = decodeDataImage(u)
@@ -436,7 +448,15 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
             val b64 = if (url.startsWith("data:")) url.substringAfter("base64,", "") else url
             if (b64.isBlank()) return null
             val bytes = Base64.decode(b64, Base64.DEFAULT)
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            // Grenzen lesen, dann mit inSampleSize dekodieren – verhindert riesige
+            // Bitmaps (Speicher-Spitzen/OOM bei 50-MP-Kamerafotos).
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 2048) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
         } catch (_: Throwable) { null }
     }
 }

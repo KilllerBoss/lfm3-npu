@@ -10,7 +10,7 @@ und nutzen das on-device Modell über eine **OpenAI-kompatible lokale API**
 
 ## Download
 
-**v1.4.0**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
+**v1.4.1**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
 herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, arm64).
 
 ## Workflow
@@ -52,6 +52,12 @@ herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, a
     Hinweis; die Engine füttert nur Session-Inputs, die das Modell deklariert
     (behebt „Unknown input name logits_to_keep“)
   - Neue Anfrage bricht die laufende Generierung automatisch ab (Auto-Cancel)
+  - **v1.4.1:** Inferenz läuft auf Engine-Threads mit 128 MB Stack (behebt
+    `StackOverflowError: stack size 4107KB` bei `/v1/decide` – Java- und
+    JNI-Frames teilen sich den pthread-Stack, ORT/QNN brauchen mehr Reserve);
+    bei einem Überlauf landet der Stacktrace im Logcat und die obersten Frames
+    in der API-Fehlermeldung; Limits schützen vor pathologischen Inputs
+    (State ≤ 24 000 Zeichen, ≤ 6 Bilder, Bild-Dekodierung mit Downscaling)
 - **HTML-Runner:** immersive Vollbild-WebView (JS, DOM-Storage,
   `<input type=file>` für Bild-Upload, `getUserMedia` nach Freigabe,
   externe Links öffnen den Browser)

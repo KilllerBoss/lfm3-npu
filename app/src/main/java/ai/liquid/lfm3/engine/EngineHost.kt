@@ -16,6 +16,22 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object EngineHost {
 
+    /**
+     * Stack-Größe für den Engine-Thread.
+     *
+     * Auf ART teilen sich Java- UND native JNI-Frames denselben pthread-Stack.
+     * ONNX Runtime / QNN(Htp) nutzen intern tiefe native Aufrufe (Graph-Ausführung,
+     * HTP-Backend); mit dem System-Default (~4 MB) kann deren Stack überlaufen,
+     * was als java.lang.StackOverflowError ("stack size 4107KB") sichtbar wird.
+     * Der große Stack ist nur reservierter Adressraum und wird lazy committed.
+     */
+    private const val INFER_STACK_BYTES: Long = 128L * 1024 * 1024   // 128 MB
+
+    private val executor: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(null, r, "lfm3-engine", INFER_STACK_BYTES)
+            .apply { priority = Thread.NORM_PRIORITY + 1 }
+    }
+
     class Msg(
         @JvmField val role: String,           // "user" | "assistant"
         @JvmField var text: String,
@@ -23,10 +39,6 @@ object EngineHost {
         @JvmField var stats: String = "",
         @JvmField val bitmap: Bitmap? = null
     )
-
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "lfm3-engine").apply { priority = Thread.NORM_PRIORITY + 1 }
-    }
 
     @Volatile var engine: OrtEngine? = null
         private set
@@ -148,7 +160,7 @@ object EngineHost {
             }
             onDone(null)
         } catch (t: Throwable) {
-            loadError = t.message ?: t.toString()
+            loadError = errorText(t)
             log("Fehler beim Laden: $loadError")
             try { engine?.close() } catch (_: Throwable) {}
             engine = null
@@ -227,7 +239,7 @@ object EngineHost {
                     .put("usage", JSONObject().put("input_tokens", tokens).put("output_tokens", 0))
                 onDone(result, tokens)
             } catch (t: Throwable) {
-                onError(t.message ?: t.toString())
+                onError(errorText(t))
             }
         }
     }
@@ -317,7 +329,7 @@ object EngineHost {
                 onStats(stats)
             } catch (t: Throwable) {
                 isGenerating = false
-                onError(t.message ?: t.toString())
+                onError(errorText(t))
             }
         }
         return genFuture!!
@@ -428,9 +440,32 @@ object EngineHost {
                 onDone(answer, thinkBuf.toString().trim(), stats, promptTokens)
             } catch (t: Throwable) {
                 isGenerating = false
-                onError(t.message ?: t.toString())
+                onError(errorText(t))
             }
         }
+    }
+
+    // ------------------------------------------------------------- Fehlerdiagnose
+
+    /**
+     * Einheitliche Fehlertexte für Callbacks/API-Antworten.
+     * StackOverflowError: vollständigen Stacktrace ins Logcat, oberste Frames in
+     * die Nachricht – damit die Ursache (Java- oder nativer Überlauf in ORT/QNN)
+     * ohne Logcat erkennbar ist.
+     */
+    private fun errorText(t: Throwable): String {
+        if (t is StackOverflowError) {
+            try {
+                android.util.Log.e("LFM3-Engine", "StackOverflowError im Engine-Thread", t)
+            } catch (_: Throwable) {}
+            val frames = t.stackTrace.take(12).joinToString(" <- ") {
+                "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+            }
+            return "Stacküberlauf im Engine-Thread (${t.message ?: "unbekannte Tiefe"}). " +
+                "Modell-Run bricht ab, bevor er die NPU erreicht – bitte neue Version installieren " +
+                "(v1.4.1 nutzt 128 MB Engine-Stack). Frames: ${frames.ifEmpty { "keine (nativer Überlauf)" }}"
+        }
+        return t.message ?: t.toString()
     }
 
     // ---------------------------------------------------------------- Einzelausführung (Agent)
