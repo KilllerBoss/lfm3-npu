@@ -51,6 +51,9 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
                 "/v1/chat/completions" ->
                     if (session.method == Method.POST) chatCompletions(session)
                     else jsonError(405, "Nur POST")
+                "/v1/decide" ->
+                    if (session.method == Method.POST) decideCompletions(session)
+                    else jsonError(405, "Nur POST")
                 "/app.html" -> serveApp()
                 else -> jsonError(404, "Unbekannter Endpunkt: $uri")
             }
@@ -82,7 +85,7 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
             .put("model", modelJson)
             .put("endpoints", JSONArray()
                 .put("GET /status").put("GET /models").put("POST /load")
-                .put("POST /v1/chat/completions").put("POST /stop"))
+                .put("POST /v1/chat/completions").put("POST /v1/decide").put("POST /stop"))
         return newFixedLengthResponse(Response.Status.OK, "application/json", o.toString()).withCors()
     }
 
@@ -143,7 +146,8 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
             "Kein Modell geladen. Öffne die LFM3-App und lade im Launcher ein Modell.")
         if (EngineHost.engine?.isSinglePass == true) return jsonError(400,
             "Das geladene Modell (d1-2B) ist ein Ein-Pass-Entscheidungsmodell ohne Textgenerierung " +
-            "(kein KV-Cache). Für die Chat-API bitte LFM3-VL-2B (Vision+JSON) oder LFM3-1.7B (Text) laden.")
+            "(kein KV-Cache). Für Boxen/Zählen/Auswahl aus Bildern nutze POST /v1/decide (System-One); " +
+            "für die Chat-API bitte LFM3-VL-2B (Vision+JSON) oder LFM3-1.7B (Text) laden.")
 
         val req = try { JSONObject(readBody(session)) } catch (t: Throwable) {
             return jsonError(400, "Ungültiges JSON: ${t.message}")
@@ -279,6 +283,61 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
         )
 
         return newChunkedResponse(Response.Status.OK, "text/event-stream", pin).withCors()
+    }
+
+    // ================================================================ Decide-API (d1)
+
+    /**
+     * POST /v1/decide – System-One-Fragen über ein d1-Modell (ein Forward-Pass):
+     * {"state": "…" | null, "image": "data:image/…;base64,…", "images": [...],
+     *  "score_readout": "median",
+     *  "questions": {"name": {"type": "box|boxes|number|choice|score|noul",
+     *                          "instructions": "…", "criteria": …, "range": …, "max": …}}}
+     * -> {"ok":true, "answers": {"name": {typisierte Antwort}}, "usage": {…}}
+     */
+    private fun decideCompletions(session: IHTTPSession): Response {
+        if (EngineHost.engine == null) return jsonError(503,
+            "Kein Modell geladen. Öffne die LFM3-App und lade im Launcher ein Modell.")
+        if (EngineHost.engine?.isSinglePass != true) return jsonError(400,
+            "/v1/decide braucht ein d1-Entscheidungsmodell (Ein-Pass). " +
+            "Bitte im Launcher d1-2B laden – für Chat/Vision über die Chat-API " +
+            "bitte LFM3-VL-2B oder LFM3-1.7B laden.")
+        val req = try { JSONObject(readBody(session)) } catch (t: Throwable) {
+            return jsonError(400, "Ungültiges JSON: ${t.message}")
+        }
+        val questions = req.optJSONObject("questions")
+            ?: return jsonError(400, "'questions' (Objekt) fehlt: " +
+                "{\"name\": {\"type\": \"box\", \"instructions\": \"Wo ist …?\"}}")
+        val state = if (req.has("state") && !req.isNull("state")) req.optString("state") else null
+        val images = ArrayList<Bitmap>()
+        val urls = ArrayList<String>()
+        if (req.has("image") && !req.isNull("image")) urls.add(req.optString("image"))
+        req.optJSONArray("images")?.let { arr ->
+            for (i in 0 until arr.length()) urls.add(arr.optString(i))
+        }
+        for (u in urls) {
+            val bmp = decodeDataImage(u)
+                ?: return jsonError(400, "Bild konnte nicht dekodiert werden (data-URL mit base64 erwartet)")
+            images.add(bmp)
+        }
+        val scoreReadout = req.optString("score_readout", "median")
+        if (scoreReadout !in setOf("mean", "median", "argmax")) {
+            return jsonError(400, "score_readout ist mean, median oder argmax – nicht '$scoreReadout'")
+        }
+
+        val latch = CountDownLatch(1)
+        var result: JSONObject? = null
+        var error: String? = null
+        EngineHost.decideApi(
+            ctx = appCtx, state = state, images = images, questions = questions,
+            scoreReadout = scoreReadout,
+            onDone = { r, _ -> result = r; latch.countDown() },
+            onError = { e2 -> error = e2; latch.countDown() }
+        )
+        latch.await()
+        if (error != null) return jsonError(400, "Decision fehlgeschlagen: $error")
+        return newFixedLengthResponse(Response.Status.OK, "application/json",
+            (result ?: JSONObject()).put("ok", true).toString()).withCors()
     }
 
     // ================================================================ App-HTML

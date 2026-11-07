@@ -3,6 +3,7 @@ package ai.liquid.lfm3.engine
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Bitmap
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -142,7 +143,8 @@ object EngineHost {
             loadError = null
             log("Geladen: ${model.displayName} [${prec.id}] via $backend")
             if (e.isSinglePass) {
-                log("⚠ ${model.displayName} ist ein Ein-Pass-Modell: keine Chat-Textgenerierung möglich (d1 braucht System-One-Protokoll). Für die Chat-API LFM3-VL-2B laden.")
+                log("⚠ ${model.displayName} ist ein Ein-Pass-Entscheidungsmodell: keine Chat-Textgenerierung. " +
+                    "HTML-Apps nutzen für d1 POST /v1/decide (System-One). Für die Chat-API LFM3-VL-2B laden.")
             }
             onDone(null)
         } catch (t: Throwable) {
@@ -151,6 +153,82 @@ object EngineHost {
             try { engine?.close() } catch (_: Throwable) {}
             engine = null
             onDone(loadError)
+        }
+    }
+
+    // ------------------------------------------------------- d1 System-One
+
+    @Volatile private var calibration: D1.Calibration? = null
+
+    /** Kalibrierung (Temperaturen + Tabellen) aus dem APK-Asset, einmalig. */
+    private fun loadCalibration(ctx: Context): D1.Calibration {
+        if (calibration == null) {
+            val json = try {
+                ctx.assets.open("d1_calibration.json").bufferedReader().use { it.readText() }
+            } catch (_: Throwable) { null }
+            calibration = D1.Calibration.parse(json)
+        }
+        return calibration!!
+    }
+
+    /**
+     * d1-Decision für die HTTP-API (POST /v1/decide): benannte Fragen über einen
+     * State (Text) und/oder Bilder, ein Forward-Pass, typisierte Antworten.
+     * Läuft im Engine-Thread, Ergebnis über onDone/onError.
+     */
+    fun decideApi(
+        ctx: Context,
+        state: String?,
+        images: List<Bitmap>,
+        questions: JSONObject,
+        scoreReadout: String,
+        onDone: (result: JSONObject, inputTokens: Int) -> Unit,
+        onError: (String) -> Unit
+    ): Future<*> {
+        val e = engine
+        val tok = tokenizer
+        if (e == null || tok == null) {
+            onError("Kein Modell geladen")
+            return executor.submit {}
+        }
+        if (!e.isSinglePass) {
+            onError("Die /v1/decide-API braucht ein d1-Entscheidungsmodell. " +
+                "Bitte im Launcher d1-2B laden (für Chat: LFM3-VL-2B oder LFM3-1.7B).")
+            return executor.submit {}
+        }
+        if (isGenerating) {
+            onError("Es läuft bereits eine Generierung")
+            return executor.submit {}
+        }
+
+        return executor.submit {
+            try {
+                val qs = D1.parseQuestions(questions)
+                val needsBox = qs.any { it.q is D1.Box || it.q is D1.Boxes }
+                if (needsBox && images.size != 1) {
+                    throw IllegalArgumentException(
+                        "box/boxes-Fragen brauchen genau 1 Bild (Feld \"image\" oder \"images\")")
+                }
+                if (qs.isEmpty()) throw IllegalArgumentException("questions ist leer")
+
+                // Vision-Größen planen -> Markup-Token-Anzahl je Bild
+                val tokenCounts = images.map { b ->
+                    val (fw, fh) = e.planVision(b).let { it[0] to it[1] }
+                    e.imageTokenCount(fw, fh)
+                }.toIntArray()
+
+                val passes = D1.buildPasses(tok, state, tokenCounts, qs)
+                val logits = e.decide(passes, images)
+                val answers = D1.answersNamed(tok, qs, logits, loadCalibration(ctx), scoreReadout)
+                var tokens = 0
+                for (p in passes) tokens += p.inputIds.size
+                val result = JSONObject()
+                    .put("answers", answers)
+                    .put("usage", JSONObject().put("input_tokens", tokens).put("output_tokens", 0))
+                onDone(result, tokens)
+            } catch (t: Throwable) {
+                onError(t.message ?: t.toString())
+            }
         }
     }
 
@@ -177,7 +255,8 @@ object EngineHost {
         }
         if (e.isSinglePass) {
             onError("Das geladene Modell ist ein Ein-Pass-Entscheidungsmodell (d1) ohne " +
-                "Textgenerierung. Für Chat/Vision/JSON bitte LFM3-VL-2B oder LFM3-1.7B laden.")
+                "Textgenerierung. Es antwortet über POST /v1/decide (System-One-Fragen). " +
+                "Für Chat/Vision über diese API bitte LFM3-VL-2B oder LFM3-1.7B laden.")
             return executor.submit {}
         }
 
@@ -287,9 +366,9 @@ object EngineHost {
         }
         if (e.isSinglePass) {
             onError("Das geladene Modell (d1-2B) ist ein Ein-Pass-Entscheidungsmodell ohne " +
-                "Textgenerierung (kein KV-Cache). Es antwortet nur über das spezielle " +
-                "System-One-Protokoll. Für die Chat-API bitte LFM3-VL-2B (Vision+JSON) " +
-                "oder LFM3-1.7B (Text) laden.")
+                "Textgenerierung (kein KV-Cache). Es antwortet über POST /v1/decide " +
+                "(System-One-Fragen: box/boxes/number/choice/score/noul). Für die Chat-API " +
+                "bitte LFM3-VL-2B (Vision+JSON) oder LFM3-1.7B (Text) laden.")
             return executor.submit {}
         }
         if (isGenerating) {

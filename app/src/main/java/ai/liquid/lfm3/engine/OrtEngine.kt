@@ -5,6 +5,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import java.nio.FloatBuffer
+import java.nio.IntBuffer
 import java.nio.LongBuffer
 import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -213,8 +214,11 @@ class OrtEngine {
         if (bitmap != null && visionInputName != null) {
             try {
                 val t0 = System.currentTimeMillis()
-                visionFeat = runVision(bitmap)
-                log("Vision-Features in ${System.currentTimeMillis() - t0} ms erzeugt")
+                val vr = runVision(bitmap)
+                visionFeat = adaptVisionToDecoder(vr.feat)
+                if (visionFeat !== vr.feat) try { vr.feat.close() } catch (_: Throwable) {}
+                log("Vision-Features in ${System.currentTimeMillis() - t0} ms erzeugt " +
+                    "(${vr.fw}x${vr.fh} -> ${imageTokenCount(vr.fw, vr.fh)} Tokens)")
             } catch (t: Throwable) {
                 log("Vision fehlgeschlagen: ${t.message}")
                 visionFeat = null
@@ -430,12 +434,38 @@ class OrtEngine {
 
     // ------------------------------------------------------------------ Vision
 
+    /** Ergebnis des Vision-Encoders: Feature-Tensor + tatsächliche Bildgröße. */
+    class VisionResult(val feat: OnnxTensor, val fw: Int, val fh: Int)
+
+    /** Skaliert ein Bitmap auf die Vision-Eingabegröße (Vielfache von 32, 0.26–1.6 MP). */
+    fun planVision(bitmap: android.graphics.Bitmap): IntArray {
+        var w = bitmap.width
+        var h = bitmap.height
+        val minP = 262_144   // 0.26M
+        val maxP = 1_638_400 // 1.6M
+        val pixels = w * h
+        if (pixels > maxP) {
+            val scale = Math.sqrt(maxP.toDouble() / pixels)
+            w = (w * scale).toInt(); h = (h * scale).toInt()
+        } else if (pixels < minP) {
+            val scale = Math.sqrt(minP.toDouble() / pixels)
+            w = (w * scale).toInt(); h = (h * scale).toInt()
+        }
+        w = (w / 32) * 32; h = (h / 32) * 32
+        if (w < 32) w = 32
+        if (h < 32) h = 32
+        return intArrayOf(w, h)
+    }
+
+    /** Anzahl Feature-Tokens für eine Encoder-Eingabegröße (Patch 16, Merge 2). */
+    fun imageTokenCount(fw: Int, fh: Int): Int = (fw / 32) * (fh / 32)
+
     /**
      * Bild -> Vision-Encoder -> Feature-Tensor.
      * Skaliert auf Vielfache von 32, Pixelzahl zwischen 0.26M und 1.6M,
      * Normalisierung (x/255 - 0.5) / 0.5, CHW-Layout [1,3,H,W].
      */
-    private fun runVision(bitmap: android.graphics.Bitmap): OnnxTensor {
+    private fun runVision(bitmap: android.graphics.Bitmap): VisionResult {
         val vs = visionSession ?: throw IllegalStateException("Kein Vision-Encoder geladen")
         val inName = vs.inputNames.firstOrNull()
             ?: throw IllegalStateException("Vision-Encoder hat keine Inputs")
@@ -493,8 +523,276 @@ class OrtEngine {
         val input = OnnxTensor.createTensor(env, FloatBuffer.wrap(data), shape)
         val res = vs.run(mapOf(inName to input))
         val out = res.get(0) as? OnnxTensor ?: throw IllegalStateException("Vision-Output fehlt")
+        val feat = copyTensor(out)
         res.close()
         input.close()
+        return VisionResult(feat, fw, fh)
+    }
+
+    /** Kopiert einen Tensor in einen eigenständigen fp32-Tensor (Result schließt sonst die Werte mit). */
+    private fun copyTensor(t: OnnxTensor): OnnxTensor {
+        val shape = tensorShape(t)
+        val n = shape.fold(1L) { a, b -> a * b }.toInt()
+        return when (t.type) {
+            OnnxJavaType.FLOAT16 -> {
+                val sb = t.shortBuffer
+                val f = FloatArray(n)
+                for (i in 0 until n) f[i] = halfToFloat(sb.get(i))
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(f), shape)
+            }
+            else -> {
+                val fb = t.floatBuffer
+                val f = FloatArray(n)
+                fb.get(f)
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(f), shape)
+            }
+        }
+    }
+
+    // --------------------------------------------------- d1 System-One-Decide
+
+    /** float16 <-> float (Bit-Konvertierung). */
+    private fun halfToFloat(h: Short): Float {
+        val bits = h.toInt() and 0xFFFF
+        val sign = (bits and 0x8000) shl 16
+        val expBits = (bits and 0x7C00) shr 10
+        val mant = bits and 0x03FF
+        val out = when (expBits) {
+            0 -> if (mant == 0) sign else {
+                var e = -1
+                var m = mant
+                while (m and 0x0400 == 0) { m = m shl 1; e-- }
+                m = m and 0x03FF
+                sign or ((127 - 15 + e + 1) shl 23) or (m shl 13)
+            }
+            0x1F -> sign or 0x7F800000 or (mant shl 13)
+            else -> sign or ((expBits - 15 + 127) shl 23) or (mant shl 13)
+        }
+        return Float.fromBits(out)
+    }
+
+    private fun floatToHalf(f: Float): Short {
+        val bits = java.lang.Float.floatToIntBits(f)
+        val sign = (bits shr 16) and 0x8000
+        val expBits = (bits shr 23) and 0xFF
+        var mant = bits and 0x007FFFFF
+        if (expBits == 0xFF) return ((sign or 0x7C00) or (if (mant != 0) 1 else 0)).toShort()
+        var e = expBits - 127 + 15
+        if (e >= 0x1F) return (sign or 0x7C00).toShort()
+        if (e <= 0) {
+            if (e < -10) return sign.toShort()
+            mant = mant or 0x00800000
+            val shift = 14 - e
+            val half = (mant shr shift) or (if ((mant shr (shift - 1)) and 1 == 1) 1 else 0)
+            return (sign or half).toShort()
+        }
+        return (sign or (e shl 10) or (mant shr 13)).toShort()
+    }
+
+    private fun inputRank(name: String): Int = try {
+        (session?.inputInfo?.get(name)?.info as? ai.onnxruntime.TensorInfo)?.shape?.size ?: 2
+    } catch (_: Throwable) { 2 }
+
+    private fun inputType(name: String): OnnxJavaType = try {
+        (session?.inputInfo?.get(name)?.info as? ai.onnxruntime.TensorInfo)?.type ?: OnnxJavaType.INT64
+    } catch (_: Throwable) { OnnxJavaType.INT64 }
+
+    private fun feedIntTensor(inputs: HashMap<String, OnnxTensor>, name: String, data: IntArray) {
+        val rank = inputRank(name)
+        val type = inputType(name)
+        val t = if (rank <= 1) {
+            when (type) {
+                OnnxJavaType.INT32 -> OnnxTensor.createTensor(env, IntBuffer.wrap(data), longArrayOf(data.size.toLong()))
+                else -> {
+                    val l = LongArray(data.size) { data[it].toLong() }
+                    OnnxTensor.createTensor(env, LongBuffer.wrap(l), longArrayOf(data.size.toLong()))
+                }
+            }
+        } else {
+            when (type) {
+                OnnxJavaType.INT32 -> OnnxTensor.createTensor(env, IntBuffer.wrap(data), longArrayOf(1, data.size.toLong()))
+                else -> {
+                    val l = LongArray(data.size) { data[it].toLong() }
+                    OnnxTensor.createTensor(env, LongBuffer.wrap(l), longArrayOf(1, data.size.toLong()))
+                }
+            }
+        }
+        inputs[name] = t
+    }
+
+    /**
+     * Ein System-One-Decision: für jeden Pass (State + bis zu 16 Fragen, gepackt)
+     * ein Forward-Pass; die Bilder werden einmal encodiert. Rückgabe: die Logits
+     * an den Antwort-Slots, in Frage-Reihenfolge (über alle Pässe fortlaufend).
+     */
+    fun decide(passes: List<D1.D1Pass>, images: List<android.graphics.Bitmap>): Array<FloatArray> {
+        val s = session ?: throw IllegalStateException("Kein Modell geladen")
+        var feat: OnnxTensor? = null
+        var featOwned = false
+        try {
+            if (images.isNotEmpty()) {
+                if (visionSession == null || visionInputName == null) {
+                    throw IllegalStateException("Kein Vision-Encoder geladen (Vision-Modell fehlt)")
+                }
+                val results = images.map { runVision(it) }
+                try {
+                    if (results.size == 1) {
+                        feat = adaptVisionToDecoder(results[0].feat)
+                        featOwned = feat !== results[0].feat
+                    } else {
+                        feat = concatVision(results)
+                        featOwned = true
+                    }
+                } finally {
+                    for (r in results) if (r.feat !== feat) try { r.feat.close() } catch (_: Throwable) {}
+                }
+            }
+            val all = ArrayList<FloatArray>(64)
+            for (pass in passes) {
+                val logits = runDecidePass(s, pass, feat)
+                if (logits.size != pass.slotCount) {
+                    throw IllegalStateException("Graph lieferte ${logits.size} Slot-Logits, erwartet ${pass.slotCount}")
+                }
+                all.addAll(logits)
+            }
+            return all.toTypedArray()
+        } finally {
+            if (featOwned) try { feat?.close() } catch (_: Throwable) {}
+        }
+    }
+
+    /** Bringt Vision-Features auf den Dtype/Rang, den der Decoder-Input erwartet. */
+    private fun adaptVisionToDecoder(src: OnnxTensor): OnnxTensor {
+        val vn = visionInputName ?: return src
+        val info = try { session?.inputInfo?.get(vn)?.info as? ai.onnxruntime.TensorInfo } catch (_: Throwable) { null }
+        val wantType = info?.type ?: OnnxJavaType.FLOAT
+        val wantRank = info?.shape?.size ?: src.info.let { (it as? ai.onnxruntime.TensorInfo)?.shape?.size ?: 2 }
+        val srcShape = (src.info as? ai.onnxruntime.TensorInfo)?.shape ?: LongArray(0)
+        val srcRank = srcShape.size
+        if (wantType == src.type && wantRank == srcRank) return src
+        // Werte kopieren
+        val d = srcShape.last()
+        val n = srcShape.dropLast(1).fold(1L) { a, b -> a * b }
+        val floats = FloatArray((n * d).toInt())
+        when (src.type) {
+            OnnxJavaType.FLOAT16 -> {
+                val sb = src.shortBuffer
+                for (i in floats.indices) floats[i] = halfToFloat(sb.get(i))
+            }
+            else -> {
+                val fb = src.floatBuffer
+                fb.get(floats)
+            }
+        }
+        val shape = if (wantRank >= 3) longArrayOf(1, n, d)
+            else if (wantRank == 2) longArrayOf(n, d)
+            else longArrayOf(n * d)
+        return when (wantType) {
+            OnnxJavaType.FLOAT16 -> {
+                val shorts = ShortArray(floats.size) { floatToHalf(floats[it]) }
+                OnnxTensor.createTensor(env, ShortBuffer.wrap(shorts), shape, OnnxJavaType.FLOAT16)
+            }
+            else -> OnnxTensor.createTensor(env, FloatBuffer.wrap(floats), shape)
+        }
+    }
+
+    /** Mehrere Bilder: Features an der Token-Achse verketten [1, N1+N2, D]. */
+    private fun concatVision(results: List<VisionResult>): OnnxTensor {
+        val shape0 = (results[0].feat.info as? ai.onnxruntime.TensorInfo)?.shape ?: LongArray(0)
+        val d = shape0.last()
+        val nTotal = results.sumOf { r ->
+            val sh = (r.feat.info as? ai.onnxruntime.TensorInfo)?.shape ?: LongArray(0)
+            sh.dropLast(1).fold(1L) { a, b -> a * b }
+        }
+        val floats = FloatArray((nTotal * d).toInt())
+        var at = 0
+        for (r in results) {
+            val sh = (r.feat.info as? ai.onnxruntime.TensorInfo)?.shape ?: LongArray(0)
+            val n = sh.dropLast(1).fold(1L) { a, b -> a * b }.toInt()
+            val src = adaptVisionToDecoder(r.feat)
+            when (src.type) {
+                OnnxJavaType.FLOAT16 -> {
+                    val sb = src.shortBuffer
+                    for (i in 0 until n * d.toInt()) floats[at + i] = halfToFloat(sb.get(i))
+                }
+                else -> {
+                    val fb = src.floatBuffer.duplicate()
+                    fb.get(floats, at, n * d.toInt())
+                }
+            }
+            if (src !== r.feat) try { src.close() } catch (_: Throwable) {}
+            at += n * d.toInt()
+        }
+        val shape = longArrayOf(1, nTotal, d)
+        return OnnxTensor.createTensor(env, FloatBuffer.wrap(floats), shape)
+    }
+
+    /** Ein Forward-Pass für eine gepackte d1-Zeile; Rückgabe: Slot-Logits [S][vocab]. */
+    private fun runDecidePass(s: OrtSession, pass: D1.D1Pass, feat: OnnxTensor?): List<FloatArray> {
+        val inputs = HashMap<String, OnnxTensor>()
+        inputs[inputIdsName] = OnnxTensor.createTensor(env,
+            LongBuffer.wrap(LongArray(pass.inputIds.size) { pass.inputIds[it].toLong() }),
+            longArrayOf(1, pass.inputIds.size.toLong()))
+        val mask = LongArray(pass.inputIds.size) { 1L }
+        inputs[attnName] = OnnxTensor.createTensor(env, LongBuffer.wrap(mask), longArrayOf(1, mask.size.toLong()))
+        if (hasPosInput) {
+            val pos = LongArray(pass.inputIds.size) { it.toLong() }
+            inputs[posName] = OnnxTensor.createTensor(env, LongBuffer.wrap(pos), longArrayOf(1, pos.size.toLong()))
+        }
+        feedIntTensor(inputs, "question_ids", pass.questionIds)
+        feedIntTensor(inputs, "slot_positions", pass.slotPositions)
+        if (feat != null && visionInputName != null && visionInputName in sessionInputs) {
+            inputs[visionInputName!!] = feat
+        }
+
+        // Sicherheitsnetz: unbekannte Inputs nicht füttern
+        val iter = inputs.entries.iterator()
+        while (iter.hasNext()) {
+            val en = iter.next()
+            if (en.key !in sessionInputs) {
+                try { en.value.close() } catch (_: Throwable) {}
+                iter.remove()
+            }
+        }
+
+        val res = s.run(inputs)
+        try {
+            val logitsT = res.get("logits").orElse(null) as? OnnxTensor
+                ?: throw IllegalStateException("Output 'logits' fehlt")
+            return readSlotLogits(logitsT, pass.slotPositions.size)
+        } finally {
+            try { res.close() } catch (_: Throwable) {}
+        }
+    }
+
+    /** Logits an den Slots [S][vocab] – verträgt [S,V], [1,S,V] und fp16. */
+    private fun readSlotLogits(t: OnnxTensor, expectedSlots: Int): List<FloatArray> {
+        val shape = tensorShape(t)
+        val vocab = shape.last().toInt()
+        val slots = if (shape.size >= 2) shape[shape.size - 2].toInt() else 1
+        if (slots != expectedSlots && !(slots == 1 && expectedSlots == 1)) {
+            throw IllegalStateException("Slot-Logits: ${slots} Zeilen, ${expectedSlots} erwartet")
+        }
+        val n = slots * vocab
+        val out = ArrayList<FloatArray>(slots)
+        when (t.type) {
+            OnnxJavaType.FLOAT16 -> {
+                val sb = t.shortBuffer
+                for (row in 0 until slots) {
+                    val f = FloatArray(vocab)
+                    for (i in 0 until vocab) f[i] = halfToFloat(sb.get(row * vocab + i))
+                    out.add(f)
+                }
+            }
+            else -> {
+                val fb = t.floatBuffer
+                for (row in 0 until slots) {
+                    val f = FloatArray(vocab)
+                    fb.get(f)
+                    out.add(f)
+                }
+            }
+        }
         return out
     }
 

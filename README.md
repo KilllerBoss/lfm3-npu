@@ -10,7 +10,7 @@ und nutzen das on-device Modell über eine **OpenAI-kompatible lokale API**
 
 ## Download
 
-**v1.3.1**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
+**v1.4.0**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
 herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, arm64).
 
 ## Workflow
@@ -30,8 +30,9 @@ herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, a
   - `LFM3-VL-2B-ONNX` – Vision (Bild + Chat)
   - `LFM3-Audio-2B-ONNX` – Audio (Sprach-I/O über System-Speech)
   - `LFM3-Omni-2B-ONNX` – Omni (Text + Bild + Sprache)
-  - `d1-2B-ONNX` – Ein-Pass-Entscheidungsmodell (mit Vision, **kein Chat** –
-    kein KV-Cache im Export; für Vision+JSON über die Chat-API LFM3-VL-2B laden)
+  - `d1-2B-ONNX` – Ein-Pass-Entscheidungen in Millisekunden: Objekt-Boxen
+    (box/boxes), Zählen, Auswahl, Ja/Nein über `POST /v1/decide` (kein Chat –
+    dafür LFM3-VL-2B laden)
 - **Alle Quantisierungen:** q4 · q4f32 · q8 · q4f16 · q8f16 · fp16 · fp32
   (je nach Verfügbarkeit im jeweiligen HF-Repo)
 - **QNN/HTP-Pure-Backend** (`libQnnHtp.so`, `high_performance`) mit optionalem
@@ -45,8 +46,10 @@ herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, a
   - Vision-Input über `image_url`-Parts (data-URL/base64) für VL/Omni;
     Thinking als `reasoning_content`
   - Ein-Pass-Modelle (d1-2B, `single_pass:true` in `/status` & `/models`)
-    antworten auf `/v1/chat/completions` mit HTTP 400 + klarem Hinweis;
-    die Engine füttert nur Session-Inputs, die das Modell deklariert
+    antworten über **`POST /v1/decide`** (System-One): benannte Fragen
+    (box/boxes/number/choice/score/noul) über State + Bild, EIN Forward-Pass,
+    kalibrierte typisierte Antworten; Chat-Aufrufe liefern HTTP 400 mit
+    Hinweis; die Engine füttert nur Session-Inputs, die das Modell deklariert
     (behebt „Unknown input name logits_to_keep“)
   - Neue Anfrage bricht die laufende Generierung automatisch ab (Auto-Cancel)
 - **HTML-Runner:** immersive Vollbild-WebView (JS, DOM-Storage,
@@ -89,9 +92,10 @@ app/src/main/java/ai/liquid/lfm3/
 │   ├── ModelCatalog.kt     # Automatisch generiert aus HF tree.json (scripts/gen_catalog.py)
 │   ├── ModelManager.kt     # HF-Downloads (Progress, Cancel, Resume-freundlich)
 │   ├── ModelTasks.kt       # Download/Laden/Entladen-Zentrale (zustandslos überlebt UI)
-│   ├── LfmTokenizer.kt     # Byte-Level-BPE (293k Merges, added_tokens, UTF-8-Streaming)
+│   ├── LfmTokenizer.kt     # Byte-Level-BPE (293k Merges, exakter LFM3-Pre-Tokenizer, UTF-8-Streaming)
 │   ├── ChatTemplate.kt     # ChatML-Template mit <think>-Handling
-│   ├── OrtEngine.kt        # ONNX Runtime + QNN/HTP, KV-Cache-Zero-Copy, Sampling
+│   ├── D1.kt               # d1 System-One: Fragen, Set-Packing, Slot-Readout, Kalibrierung, Boxen
+│   ├── OrtEngine.kt        # ONNX Runtime + QNN/HTP, KV-Cache-Zero-Copy, d1-Decide-Pfad, Sampling
 │   └── EngineHost.kt       # Singleton: Laden, chatApi() für die HTTP-API
 └── ui/
     ├── HtmlRunnerActivity.kt  # Vollbild-WebView (File-Upload, getUserMedia)

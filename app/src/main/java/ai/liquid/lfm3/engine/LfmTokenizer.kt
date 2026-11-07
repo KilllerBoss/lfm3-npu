@@ -22,9 +22,15 @@ class LfmTokenizer(tokenizerJson: String) {
     private val byteToUnicode = arrayOfNulls<String>(256)
     private val unicodeToByte = HashMap<Char, Byte>(256)
 
-    /** GPT-2-Pre-Tokenizer-Regex (verhindert Merges über Wortgrenzen). */
+    /**
+     * Exakter LFM3-Pre-Tokenizer (aus tokenizer.json): Ziffern in 3er-Gruppen,
+     * Punktuierung schluckt nachfolgende Zeilenumbrüche (":\n" = ein Pretoken!),
+     * ein optionales Nicht-Buchstaben/Nicht-Neue-Zeile-Zeichen vor Wörtern.
+     * Wichtig für d1: die Slot-Marker ("present:", "top:" …) müssen exakt so
+     * tokenisieren wie das HF-Original.
+     */
     private val pretok = Regex(
-        "'(?i:[sdmt]|ll|ve|re)| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"
+        "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
     )
 
     init {
@@ -138,6 +144,21 @@ class LfmTokenizer(tokenizerJson: String) {
     }
 
     private fun bpeSegment(s: String, out: ArrayList<Int>) {
+        bpeSegmentWithSpans(s, out, null, 0, null, null)
+    }
+
+    /**
+     * BPE über ein Segment; wenn [spansOut] gesetzt ist, wird pro Token der
+     * Zeichen-Bereich im Originaltext ([segStart] + Offset) mitgeschrieben.
+     */
+    private fun bpeSegmentWithSpans(
+        s: String,
+        out: ArrayList<Int>,
+        spansOut: ArrayList<IntArray>?,
+        segStart: Int,
+        byteToChar: IntArray?,   // Byte-Index -> Zeichen-Index im Segment
+        segChars: Int?           // Zeichenanzahl des Segments
+    ) {
         if (s.isEmpty()) return
         val mapped = StringBuilder(s.length + 4)
         val bytes = s.toByteArray(Charsets.UTF_8)
@@ -145,17 +166,47 @@ class LfmTokenizer(tokenizerJson: String) {
         for (m in pretok.findAll(mapped)) {
             val word = m.value
             val direct = vocab[word]
-            if (direct != null) { out.add(direct); continue } // ignore_merges
-            bpeWord(word, out)
+            if (direct != null) {
+                out.add(direct)
+                if (spansOut != null) addSpan(spansOut, m.range.first, m.range.last + 1, segStart, byteToChar, segChars, 1)
+                continue // ignore_merges
+            }
+            bpeWordWithSpans(word, out, spansOut, m.range.first, segStart, byteToChar, segChars)
         }
     }
 
-    private fun bpeWord(word: String, out: ArrayList<Int>) {
+    /** Span eines Tokens aus gemappten Byte-Positionen -> Original-Zeichenpositionen. */
+    private fun addSpan(
+        spansOut: ArrayList<IntArray>, mappedStart: Int, mappedEnd: Int,
+        segStart: Int, byteToChar: IntArray?, segChars: Int?, tokenCount: Int
+    ) {
+        if (tokenCount != 1) return // nur Einzeltoken-Spans hier; BPE-Teile einzeln unten
+        val cs = if (byteToChar != null) {
+            val b0 = mappedStart; val b1 = mappedEnd
+            val c0 = byteToChar.getOrElse(b0) { segChars ?: 0 }
+            val c1 = if (b1 >= byteToChar.size) (segChars ?: c0) else byteToChar[b1]
+            segStart + c0 to segStart + c1
+        } else segStart + mappedStart to segStart + mappedEnd
+        spansOut.add(intArrayOf(cs.first, cs.second))
+    }
+
+    private fun bpeWordWithSpans(
+        word: String,
+        out: ArrayList<Int>,
+        spansOut: ArrayList<IntArray>?,
+        mappedStart: Int,
+        segStart: Int,
+        byteToChar: IntArray?,
+        segChars: Int?
+    ) {
+        if (spansOut == null) {
+            bpeWord(word, out)
+            return
+        }
         if (word.isEmpty()) return
         var parts: List<String> = if (word.length <= 128) {
             word.chars().mapToObj { byteToUnicode[it and 0xFF]!! }.toList()
         } else {
-            // Sehr lange Pretokens (z.B. CJK-Ketten) splitten, um O(n²) zu vermeiden
             val res = ArrayList<String>()
             var idx = 0
             while (idx < word.length) {
@@ -185,10 +236,110 @@ class LfmTokenizer(tokenizerJson: String) {
             }
             parts = np
         }
+        // Teile -> Spans: jeder Teil ist 1 Byte (gemapptes Zeichen) x Länge
+        var b = mappedStart
         for (p in parts) {
-            val id = vocab[p] ?: continue
+            val id = vocab[p]
+            if (id == null) { b += p.length; continue }
             out.add(id)
+            val c0 = if (byteToChar != null) {
+                val cA = byteToChar.getOrElse(b) { segChars ?: 0 }
+                val bEnd = b + p.length
+                val cB = if (bEnd >= byteToChar.size) (segChars ?: cA) else byteToChar[bEnd]
+                segStart + cA to segStart + cB
+            } else segStart + b to segStart + b + p.length
+            spansOut.add(intArrayOf(c0.first, c0.second))
+            b += p.length
         }
+    }
+
+    /** Encoding inkl. Zeichen-Spans je Token (für d1-Slot-Marker). */
+    fun encodeWithSpans(text: String): Triple<IntArray, IntArray, IntArray> {
+        val ids = ArrayList<Int>(text.length / 3)
+        val starts = ArrayList<Int>(text.length / 3)
+        val ends = ArrayList<Int>(text.length / 3)
+        var i = 0
+        val n = text.length
+        while (i < n) {
+            var hit: Pair<String, Int>? = null
+            if (text[i] == '<') {
+                for (sp in specialsByLen) {
+                    if (text.startsWith(sp.first, i)) { hit = sp; break }
+                }
+            }
+            if (hit != null) {
+                ids.add(hit.second); starts.add(i); ends.add(i + hit.first.length)
+                i += hit.first.length
+                continue
+            }
+            // Segment bis zum nächsten Special sammeln + Byte->Zeichen-Map
+            val segStart = i
+            val seg = StringBuilder()
+            val byteToChar = ArrayList<Int>(seg.length + 16)
+            while (i < n) {
+                var h: Pair<String, Int>? = null
+                if (text[i] == '<') {
+                    for (sp in specialsByLen) {
+                        if (text.startsWith(sp.first, i)) { h = sp; break }
+                    }
+                }
+                if (h != null) break
+                val bytes = text[i].toString().toByteArray(Charsets.UTF_8)
+                repeat(bytes.size) { byteToChar.add(i - segStart) }
+                seg.append(text[i])
+                i++
+            }
+            val b2c = byteToChar.toIntArray()
+            bpeSegmentWithSpans(seg.toString(), ids, startsEndsToList(starts, ends), segStart, b2c, seg.length)
+        }
+        return Triple(ids.toIntArray(), starts.toIntArray(), ends.toIntArray())
+    }
+
+    private fun startsEndsToList(starts: ArrayList<Int>, ends: ArrayList<Int>): ArrayList<IntArray> {
+        // Wrapper, damit bpeSegmentWithSpans beide Listen füllt
+        return SpanSink(starts, ends)
+    }
+
+    private class SpanSink(val starts: ArrayList<Int>, val ends: ArrayList<Int>) : ArrayList<IntArray>() {
+        override fun add(element: IntArray): Boolean {
+            starts.add(element[0]); ends.add(element[1]); return true
+        }
+    }
+
+    /**
+     * Entwertet Special-Tokens im Text (Python-plain-Äquivalent): nach dem ersten
+     * Zeichen eines Specials wird ein Zero-Width-Space eingefügt, sodass der Text
+     * als normaler Text (nicht als Special) tokenisiert wird.
+     */
+    fun escapeSpecials(textIn: String): String {
+        var text = textIn
+        var changed = true
+        while (changed) {
+            changed = false
+            val sb = StringBuilder(text.length + 8)
+            var i = 0
+            while (i < text.length) {
+                var hit: String? = null
+                if (text[i] == '<') {
+                    for (sp in specialsByLen) {
+                        if (text.startsWith(sp.first, i)) { hit = sp.first; break }
+                    }
+                }
+                if (hit != null) {
+                    sb.append(hit[0]).append('\u200b').append(hit, 1, hit.length)
+                    changed = true
+                    i += hit.length
+                } else {
+                    sb.append(text[i]); i++
+                }
+            }
+            text = sb.toString()
+        }
+        return text
+    }
+
+    private fun bpeWord(word: String, out: ArrayList<Int>) {
+        bpeWordWithSpans(word, out, null, 0, 0, null, null)
     }
 
     /** Token-ID -> Token-String (Vokabular-Rückweg). */

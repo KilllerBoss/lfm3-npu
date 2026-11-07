@@ -41,7 +41,7 @@ $modelLine
 Model catalog (kind values):
 $kinds
 - kind VISION/OMNI/DECISION models accept image input; AUDIO models are used as text models (audio input is NOT exposed by the API).
-- IMPORTANT: kind DECISION (d1-2B-ONNX) is a special SINGLE-PASS decision model WITHOUT text generation – it can NOT answer through /v1/chat/completions (HTTP 400). If the user loads it, tell them to load LFM3-VL-2B-ONNX instead; it handles the same vision+JSON tasks through the normal chat API.
+- IMPORTANT: kind DECISION (d1-2B-ONNX) is a SINGLE-PASS decision model WITHOUT text generation – it does NOT answer /v1/chat/completions (HTTP 400). It answers POST /v1/decide instead (see below): object localization (box/boxes), counting (number+range), choice, score, yes/no – with calibrated probabilities, in ONE forward pass (milliseconds). Chat/vision/JSON prose still belongs on LFM3-VL-2B-ONNX via the chat API.
 
 GET /status
   -> {"ok":true,"app":"LFM3 NPU","version":"…","backend":"QNN/HTP (NPU)","model":{"id":"…","name":"…","kind":"…","precision":"…","image_input":true|false},"generating":false}
@@ -82,12 +82,42 @@ user content can be a parts array:
    {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,…"}}]
 Downscale images in JS (canvas, max ~1024px, JPEG quality ~0.8) before base64-encoding.
 
+POST /v1/decide                <- for kind DECISION models (d1-2B, single_pass:true in /status)
+Named questions over one state and/or one image; ONE forward pass, answers as typed JSON.
+Request body:
+{
+  "state": "…text/JSON to read from…",      // optional; omit or null for pure vision
+  "image": "data:image/jpeg;base64,…",       // optional; REQUIRED for box/boxes
+  "images": ["data:…", "data:…"],           // alternative to image (non-box questions)
+  "score_readout": "median",                 // optional: median | mean | argmax
+  "questions": {
+    "cup":  {"type":"box",   "instructions":"Where is the cup?"},
+    "cats": {"type":"boxes", "instructions":"Every cat.", "max":4},
+    "count":{"type":"number","instructions":"How many animals?","range":[0,10],"step":1},
+    "type": {"type":"choice","instructions":"Which animal is it?","criteria":{"cat":"a cat","dog":"a dog","bird":"a bird"}},
+    "tags": {"type":"choice","multiple":true,"instructions":"What is visible?","criteria":{"person":"…","car":"…"}},
+    "urgent":{"type":"score","instructions":"How urgent?","criteria":["low","medium","high"]},
+    "isa":  {"type":"noul",  "instructions":"Is this a photo of an animal?"}
+  }
+}
+Response: {"ok":true,"answers":{…},"usage":{"input_tokens":n,"output_tokens":0}}
+Answer shapes:
+- box    -> {"type":"box","box":{"top":0.1,"bottom":0.4,"left":0.2,"right":0.7},"found":0.97,"confidence":0.8}  (edges are fractions of the picture, 0=top/left; box=null when not found)
+- boxes  -> {"type":"boxes","boxes":[{"box":{…},"found":…,"confidence":…}],"count":n,"at_least":bool,"presence":[…]}
+- number -> {"type":"number","number":3,"interval":[2,4],"unit":…}   (median + p10/p90)
+- choice -> {"type":"choice","choice":"cat","confidence":…,"probabilities":{…}}  (multiple:true → "choices":[…],"probabilities":{…})
+- score  -> {"type":"score","score":1,"confidence":…,"probabilities":{…},"legend":{…}}
+- noul   -> {"type":"noul","noul":0.99}   (P(yes))
+Up to 16 questions per call (set attention packs them after the state). box/boxes need EXACTLY one image.
+Decisions are millisecond-fast: for camera apps, ask on every frame (throttle to ~2-5 fps to leave the UI responsive).
+
 === MESSAGES FORMAT RULES ===
 - Send the FULL conversation history each request as the messages array (the model has no server-side memory).
 - The app applies the LFM3 chat template automatically. NEVER add special tokens like <|im_start|> yourself.
 - Keep total context modest (roughly under 3000 tokens): summarize or drop old turns in JS when the conversation grows. If the context overflows, the API may error or truncate.
 - Exactly one generation runs at a time: a NEW /v1/chat/completions request automatically CANCELS the previous one (its stream ends early with an error event). You may also POST /stop explicitly.
 - If no model is loaded, the API returns HTTP 503 {"error":{"message":"…"}} – catch this and tell the user to load a model in the launcher.
+- Model loading can take a while and MUST not be triggered silently: only POST /load when the user tapped a button in your app.
 
 === DEVICE PERMISSIONS & NATIVE BRIDGE (window.Lfm) ===
 The host app pre-grants ALL permissions so HTML apps can use device features:
