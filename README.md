@@ -8,6 +8,11 @@ und nutzen das on-device Modell über eine **OpenAI-kompatible lokale API**
 
 > **Hinweis:** Dies ist ein Community-Projekt und steht in keiner Verbindung zu LiquidAI.
 
+## Download
+
+**v1.3.0**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
+herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, arm64).
+
 ## Workflow
 
 1. **„Modelle“ aufklappen** → Variante antippen: Download → automatisches Laden
@@ -42,6 +47,13 @@ und nutzen das on-device Modell über eine **OpenAI-kompatible lokale API**
 - **HTML-Runner:** immersive Vollbild-WebView (JS, DOM-Storage,
   `<input type=file>` für Bild-Upload, `getUserMedia` nach Freigabe,
   externe Links öffnen den Browser)
+- **Alle Geräte-Berechtigungen für HTML-Apps (v1.3.0):** Kamera, Mikrofon,
+  Standort, Medien, Benachrichtigungen, Vibration, WAKE_LOCK, Bluetooth –
+  Abfrage beim ersten Start, Button „🔒 Berechtigungen“ (X/10), WebView reicht
+  `getUserMedia` und `navigator.geolocation` automatisch weiter; Downloads aus
+  HTML-Apps landen im Download-Ordner; JS-Bridge **`window.Lfm`**: `notify`,
+  `vibrate`, `hasPermission`, `requestPermissions` (Event `lfm3-permissions`),
+  `keepScreenOn`, `share`, `exitApp`, `appVersion`
 - **Systemprompt-Button:** fertiger, kopierbarer Prompt für externe KIs
   (Umgebung, API, Modellkatalog, Nachrichtenformat, UX-Regeln)
 - **Einstellungen:** Präzision pro Modell, CPU-Fallback
