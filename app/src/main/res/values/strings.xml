@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LFM3 NPU</string>
+
+    <!-- Navigation -->
+    <string name="nav_chat">Chat</string>
+    <string name="nav_live">Live</string>
+    <string name="nav_agent">Agent</string>
+    <string name="nav_models">Modelle</string>
+    <string name="nav_info">Info</string>
+
+    <!-- Chat -->
+    <string name="hint_message">Nachricht…</string>
+    <string name="send">Senden</string>
+    <string name="new_chat">Neuer Chat</string>
+    <string name="stop_gen">Stopp</string>
+    <string name="no_model_loaded">Kein Modell geladen – lade eines unter „Modelle“</string>
+    <string name="attach_image">Bild anhängen</string>
+    <string name="voice_input">Spracheingabe</string>
+    <string name="listen_prompt">Ich höre…</string>
+
+    <!-- Modelle -->
+    <string name="models_title">Modell-Verwaltung</string>
+    <string name="download">Herunterladen</string>
+    <string name="delete">Löschen</string>
+    <string name="load">Laden</string>
+    <string name="downloading">lädt…</string>
+    <string name="installed">installiert</string>
+    <string name="backend_npu">Backend: QNN/HTP (Hexagon NPU)</string>
+    <string name="backend_cpu">Backend: CPU</string>
+
+    <!-- Live -->
+    <string name="live_title">Live-Sprache</string>
+    <string name="live_start">Sprechen</string>
+    <string name="live_stop">Stopp</string>
+    <string name="live_state_idle">Tippe aufs Mikro und sprich</string>
+    <string name="live_state_listening">Ich höre zu…</string>
+    <string name="live_state_thinking">Denkt…</string>
+    <string name="live_state_speaking">Antwortet…</string>
+
+    <!-- Agent -->
+    <string name="agent_title">Agent (d1 + Tools)</string>
+    <string name="agent_hint">Bild wählen + Fragen stellen: d1 liefert strukturierte JSON-Antworten. LFM3-1.7B kann Rechner-/Zeit-Tools per Tool-Calling nutzen.</string>
+    <string name="agent_questions">Fragen (eine pro Zeile)</string>
+    <string name="agent_run">Ausführen</string>
+
+    <!-- Info -->
+    <string name="info_title">Einstellungen &amp; Info</string>
+    <string name="settings_context">Max. Kontextlänge: %1$d Tokens</string>
+    <string name="settings_temp">Temperature: %1$.2f</string>
+    <string name="settings_think">Thinking-Modus</string>
+    <string name="settings_npu_fallback">CPU-Fallback erlauben, wenn QNN fehlschlägt</string>
+    <string name="settings_system_prompt">System-Prompt</string>
+    <string name="info_links">Links</string>
+    <string name="ctx_full">Kontext voll (%1$d Tokens) – starte einen neuen Chat</string>
+    <string name="cancel">Abbrechen</string>
+    <string name="error">Fehler: %1$s</string>
+</resources>

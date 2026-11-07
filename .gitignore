@@ -1,0 +1,20 @@
+# Gradle / Android
+.gradle/
+build/
+app/build/
+local.properties
+*.jks
+!keystore.jks
+captures/
+.externalNativeBuild
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Modell-Dateien (werden zur Laufzeit heruntergeladen)
+*.onnx
+*.onnx_data
+*.apk.idsig

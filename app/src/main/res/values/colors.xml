@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Liquid-Look: dunkel mit Violett/Türkis -->
+    <color name="bg">#0B0F19</color>
+    <color name="bg_elev">#121828</color>
+    <color name="bg_elev2">#1A2236</color>
+    <color name="accent">#7C5CFF</color>
+    <color name="accent2">#37E5C8</color>
+    <color name="text_primary">#F2F4FA</color>
+    <color name="text_secondary">#9AA3B8</color>
+    <color name="bubble_user">#7C5CFF</color>
+    <color name="bubble_bot">#1A2236</color>
+    <color name="think_text">#8FB8D8</color>
+    <color name="error_red">#FF6B6B</color>
+    <color name="chip_bg">#223049</color>
+    <color name="stroke">#252E45</color>
+    <color name="ic_launcher_background">#0B0F19</color>
+</resources>

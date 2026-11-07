@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/nav_chat" android:icon="@drawable/ic_chat" android:title="@string/nav_chat" />
+    <item android:id="@+id/nav_live" android:icon="@drawable/ic_mic" android:title="@string/nav_live" />
+    <item android:id="@+id/nav_agent" android:icon="@drawable/ic_agent" android:title="@string/nav_agent" />
+    <item android:id="@+id/nav_models" android:icon="@drawable/ic_models" android:title="@string/nav_models" />
+    <item android:id="@+id/nav_info" android:icon="@drawable/ic_info" android:title="@string/nav_info" />
+</menu>
