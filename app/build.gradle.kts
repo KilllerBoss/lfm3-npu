@@ -11,8 +11,8 @@ android {
         applicationId = "ai.liquid.lfm3"
         minSdk = 31
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.1.1"
+        versionCode = 4
+        versionName = "1.2.0"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -67,4 +67,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Lokaler HTTP-Server für die HTML-Apps (OpenAI-kompatible API)
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 }

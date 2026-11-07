@@ -240,6 +240,105 @@ object EngineHost {
         cancelFlag.set(true)
     }
 
+    /** Entfernt das aktuelle Modell und gibt Speicher frei (Engine-Thread). */
+    fun unloadModel() {
+        executor.submit {
+            cancelFlag.set(true)
+            try { engine?.close() } catch (_: Throwable) {}
+            engine = null
+            tokenizer = null
+            currentModel = null
+            currentPrecision = null
+            loadError = null
+        }
+    }
+
+    /**
+     * Chat für die lokale HTTP-API: explizites System-Prompt und Parameter
+     * (statt der globalen App-Einstellungen). onDelta läuft im Engine-Thread.
+     * cancelRunning=true bricht eine laufende Generierung automatisch ab
+     * (neue API-Anfrage ersetzt die alte statt 409 zu werfen).
+     */
+    fun chatApi(
+        system: String?,
+        history: List<Pair<String, String>>,
+        reasoning: Boolean,
+        maxTokens: Int,
+        temperature: Float,
+        image: Bitmap?,
+        onDelta: (text: String, inThink: Boolean) -> Unit,
+        onDone: (answer: String, reasoning: String, stats: GenStats, promptTokens: Int) -> Unit,
+        onError: (String) -> Unit
+    ): Future<*> {
+        val e = engine
+        val tok = tokenizer
+        val model = currentModel
+        if (e == null || tok == null) {
+            onError("Kein Modell geladen")
+            return executor.submit {}
+        }
+        if (isGenerating) {
+            // Auto-Cancel: laufende Generierung abbrechen. Unsere Anfrage läuft,
+            // sobald der Engine-Thread sie annimmt (isGenerating wird dort false).
+            cancelFlag.set(true)
+        }
+
+        val prompt = ChatTemplate.render(system ?: "", history, reasoning)
+        val ids = tok.encode(prompt)
+        if (ids.isEmpty()) { onError("Leerer Prompt"); return executor.submit {} }
+
+        val cfg = GenConfig(
+            maxTokens = maxTokens.coerceIn(16, 2048),
+            temperature = temperature.coerceIn(0f, 2f),
+            topK = 50,
+            topP = 0.95f,
+            repPenalty = 1.05f,
+            repWindow = 128,
+            maxContext = maxContext
+        )
+
+        cancelFlag = AtomicBoolean(false)
+        val flag = cancelFlag
+        isGenerating = true
+        val promptTokens = ids.size
+
+        return executor.submit {
+            try {
+                e.reset()
+                var inThink = reasoning
+                val thinkBuf = StringBuilder()
+                val msgBuf = StringBuilder()
+
+                val stats = e.generate(
+                    ids, cfg, tok,
+                    if (model?.needsVision == true) image else null,
+                    onDelta = { text ->
+                        if (inThink) {
+                            thinkBuf.append(text)
+                            onDelta(text, true)
+                        } else {
+                            msgBuf.append(text)
+                            onDelta(text, false)
+                        }
+                    },
+                    onSpecial = { id ->
+                        if (id == ChatTemplate.TOKEN_THINK_END && inThink) inThink = false
+                    },
+                    cancel = flag,
+                    log = { }
+                )
+
+                isGenerating = false
+                var answer = msgBuf.toString()
+                if (answer.isBlank() && thinkBuf.isNotBlank()) answer = thinkBuf.toString().trim()
+                onDone(answer, thinkBuf.toString().trim(), stats, promptTokens)
+            } catch (t: Throwable) {
+                isGenerating = false
+                onError(t.message ?: t.toString())
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- Einzelausführung (Agent)
 
     /** Ein einzelner Prompt -> Antwort-Text (blockierend, Engine-Thread). */

@@ -37,6 +37,11 @@ class App : Application() {
         super.onCreate()
         lastCrash = readLatestCrash()
 
+        // Lokaler HTTP-Server für die HTML-Apps (Port-Fallback 8787→8790→zufällig)
+        try {
+            ai.liquid.lfm3.server.ServerHost.start(this)
+        } catch (_: Throwable) {}
+
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             try {

@@ -1,10 +1,22 @@
-# LFM3 NPU – LiquidAI LFM3 on Hexagon NPU (Android)
+# LFM3 NPU – LiquidAI LFM3 on Hexagon NPU (Android) · HTML-Launcher
 
 Vollständige Android-App, die **alle LiquidAI LFM3 ONNX-Varianten lokal auf dem
-Hexagon-NPU (Qualcomm QNN/HTP)** ausführt – inspiriert vom
-[LFM Playground "Talk"](https://playground.liquid.ai/talk).
+Hexagon-NPU (Qualcomm QNN/HTP)** ausführt – als **lokaler Server + HTML-Launcher**:
+HTML-Apps, die eine externe KI (ChatGPT, Claude, …) schreibt, laufen im Vollbild-WebView
+und nutzen das on-device Modell über eine **OpenAI-kompatible lokale API**
+(`POST /v1/chat/completions`, Streaming via SSE, Vision-Input).
 
 > **Hinweis:** Dies ist ein Community-Projekt und steht in keiner Verbindung zu LiquidAI.
+
+## Workflow
+
+1. **„Modelle“ aufklappen** → Variante antippen: Download → automatisches Laden
+   (langer Tastendruck = Präzision wechseln; geladenes Modell antippen = entladen)
+2. **„Systemprompt“** kopieren und einer externen KI geben – sie erfährt daraus,
+   wie sie eine einzelne, offlinefähige HTML-App für diese Umgebung schreibt und
+   die lokale API korrekt aufruft (Endpunkte, messages-Format, LFM3-Eigenheiten)
+3. Generiertes HTML in das Eingabefeld einfügen (oder „Beispiel einfügen“)
+4. **„▶ HTML im Vollbild starten“** – Zurück-Geste beendet die Ansicht
 
 ## Features
 
@@ -19,12 +31,20 @@ Hexagon-NPU (Qualcomm QNN/HTP)** ausführt – inspiriert vom
 - **QNN/HTP-Pure-Backend** (`libQnnHtp.so`, `high_performance`) mit optionalem
   CPU-Fallback; **V68/V69/V73/V75/V79/V81** Hexagon-Architekturen im APK
   (Snapdragon 8 Elite = V79 abgedeckt)
-- **/talk-Funktionen:** Streaming-Chat (Token-für-Token), Thinking-Modus
-  (`<think>`-Stream kursiv abgesetzt), Modell-Manager mit Fortschritt/Abbruch/Löschen,
-  Backend-Info-Seite, Live-Sprachmodus (SpeechRecognizer + TTS), Agent-Tab
-  (JSON-Extraktion, Rechner-/Zeit-Tool-Calling, Bildanalyse)
-- **Einstellungen:** System-Prompt, Thinking, Kontextlänge 1k–16k Tokens
-  (mit RAM-Warnung ab 8k), Temperature, NPU-Fallback
+- **Lokaler HTTP-Server (NanoHTTPD, nur 127.0.0.1):**
+  - `GET /status`, `GET /models`, `POST /load`, `POST /stop`
+  - `POST /v1/chat/completions` – OpenAI-kompatibel (`messages`, `temperature`,
+    `max_tokens`, `reasoning`, `stream`); Streaming als SSE
+    (`data: {…choices[0].delta.content…}`, Ende `data: [DONE]`)
+  - Vision-Input über `image_url`-Parts (data-URL/base64) für VL/Omni/d1;
+    Thinking als `reasoning_content`
+  - Neue Anfrage bricht die laufende Generierung automatisch ab (Auto-Cancel)
+- **HTML-Runner:** immersive Vollbild-WebView (JS, DOM-Storage,
+  `<input type=file>` für Bild-Upload, `getUserMedia` nach Freigabe,
+  externe Links öffnen den Browser)
+- **Systemprompt-Button:** fertiger, kopierbarer Prompt für externe KIs
+  (Umgebung, API, Modellkatalog, Nachrichtenformat, UX-Regeln)
+- **Einstellungen:** Präzision pro Modell, CPU-Fallback
 - **Absturz-Diagnose:** Startet die App nicht, wird der komplette Stacktrace
   auf dem Bildschirm angezeigt und in `Android/data/ai.liquid.lfm3/files/logs/`
   geschrieben – kein stilles Abstürzen mehr.
@@ -44,16 +64,22 @@ Signatur: `keystore.jks` (im Repo, Passwörter in `app/build.gradle.kts`) –
 
 ```
 app/src/main/java/ai/liquid/lfm3/
-├── App.kt                  # Globaler Crash-Handler
-├── MainActivity.kt         # Navigation + Crash-Screen
+├── App.kt                  # Globaler Crash-Handler + Server-Start
+├── MainActivity.kt         # HTML-Launcher (Systemprompt, Modelle, HTML-Eingabe, Start)
+├── server/
+│   └── LfmServer.kt        # NanoHTTPD: OpenAI-kompatible API + /app.html (ServerHost)
 ├── engine/
 │   ├── ModelCatalog.kt     # Automatisch generiert aus HF tree.json (scripts/gen_catalog.py)
 │   ├── ModelManager.kt     # HF-Downloads (Progress, Cancel, Resume-freundlich)
+│   ├── ModelTasks.kt       # Download/Laden/Entladen-Zentrale (zustandslos überlebt UI)
 │   ├── LfmTokenizer.kt     # Byte-Level-BPE (293k Merges, added_tokens, UTF-8-Streaming)
 │   ├── ChatTemplate.kt     # ChatML-Template mit <think>-Handling
 │   ├── OrtEngine.kt        # ONNX Runtime + QNN/HTP, KV-Cache-Zero-Copy, Sampling
-│   └── EngineHost.kt       # Singleton: Laden, Chat, Tools
-└── ui/                     # Chat / Live / Agent / Modelle / Info (Views, kein Compose)
+│   └── EngineHost.kt       # Singleton: Laden, chatApi() für die HTTP-API
+└── ui/
+    ├── HtmlRunnerActivity.kt  # Vollbild-WebView (File-Upload, getUserMedia)
+    ├── SysPrompt.kt           # Systemprompt-Text für externe KIs
+    └── DemoHtml.kt            # Beispiel-Chat-App (Streaming-Demo)
 ```
 
 Technische Details (IO-Signatur, KV-Cache-Strategie, Vision-Pipeline) sind im
@@ -64,9 +90,9 @@ harte Shape-Annahmen.
 
 ## Modelle laden
 
-Tab **„Modelle“** → Variante wählen → Präzision mit `q4`-Button durchschalten →
-**Herunterladen** (HuggingFace, mit Fortschrittsbalken) → **Laden**.
-Das Modell wird nach `Android/data/ai.liquid.lfm3/files/models/` geladen.
+Launcher → **„Modelle“** → Variante antippen (Download, danach automatisches
+Laden; langer Tastendruck = Präzision). Das Modell wird nach
+`Android/data/ai.liquid.lfm3/files/models/` geladen.
 
 ## Lizenz
 
