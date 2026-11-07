@@ -5,7 +5,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.text.format.Formatter
 import android.view.View
 import android.view.ViewGroup
@@ -16,6 +18,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -28,6 +31,7 @@ import ai.liquid.lfm3.engine.ModelTasks
 import ai.liquid.lfm3.server.ServerHost
 import ai.liquid.lfm3.ui.DemoHtml
 import ai.liquid.lfm3.ui.HtmlRunnerActivity
+import ai.liquid.lfm3.ui.Permissions
 import ai.liquid.lfm3.ui.SysPrompt
 import java.io.File
 
@@ -49,7 +53,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var modelList: LinearLayout
     private lateinit var etHtml: EditText
     private lateinit var tvHtmlInfo: TextView
+    private lateinit var btnPerms: Button
     private val rows = HashMap<String, RowViews>()
+
+    /** Fordert fehlende Berechtigungen an (Kamera, Mikrofon, Standort, …). */
+    private val permLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        onPermResult(grants)
+    }
 
     @SuppressLint("SetTextI18n")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,10 +107,14 @@ class MainActivity : AppCompatActivity() {
             }
             findViewById<Button>(R.id.btn_clear).setOnClickListener { etHtml.setText("") }
             findViewById<Button>(R.id.btn_start).setOnClickListener { onStartClicked() }
+            btnPerms = findViewById(R.id.btn_perms)
+            btnPerms.setOnClickListener { onPermsClicked() }
 
             buildModelRows()
             ModelTasks.listener = { if (!isDestroyed && !isFinishing) refreshAll() }
             refreshAll()
+            refreshPermButton()
+            maybeAutoRequestPerms()
 
             App.lastCrash?.let { showCrashBanner(it) }
         } catch (t: Throwable) {
@@ -174,6 +189,73 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Schließen", null)
             .show()
+    }
+
+    // ---------------------------------------------------------------- Berechtigungen
+
+    /** Beim ersten Start automatisch alle HTML-Berechtigungen anfordern. */
+    private fun maybeAutoRequestPerms() {
+        val prefs = getSharedPreferences("lfm3", MODE_PRIVATE)
+        if (!prefs.getBoolean("perms_asked", false) && Permissions.missing(this).isNotEmpty()) {
+            prefs.edit().putBoolean("perms_asked", true).apply()
+            permLauncher.launch(Permissions.missing(this).toTypedArray())
+        }
+    }
+
+    private fun requestAllPerms() {
+        val missing = Permissions.missing(this)
+        if (missing.isEmpty()) return
+        getSharedPreferences("lfm3", MODE_PRIVATE).edit().putBoolean("perms_asked", true).apply()
+        permLauncher.launch(missing.toTypedArray())
+    }
+
+    private fun onPermResult(grants: Map<String, Boolean>) {
+        refreshPermButton()
+        val denied = grants.filterValues { !it }.keys.toList()
+        if (denied.isEmpty()) {
+            toast("✅ Alle Berechtigungen erteilt – HTML-Apps können Kamera, Mikrofon, Standort & Co. nutzen")
+        } else {
+            toast("⚠️ Nicht erteilt: ${denied.joinToString(", ") { Permissions.label(it) }}")
+        }
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun refreshPermButton() {
+        if (!this::btnPerms.isInitialized) return
+        val total = Permissions.RUNTIME.size
+        val ok = Permissions.grantedCount(this)
+        btnPerms.text = if (ok == total)
+            "🔒 Berechtigungen: $ok/$total ✓ – HTML-Apps dürfen alles (Kamera, Mikrofon, Standort, …)"
+        else
+            "🔒 Berechtigungen: $ok/$total – tippen zum Erteilen"
+    }
+
+    private fun onPermsClicked() {
+        val missing = Permissions.missing(this)
+        if (missing.isEmpty()) {
+            toast("✅ Alle Berechtigungen sind erteilt – HTML-Apps können alles nutzen")
+            return
+        }
+        // Dauerverweigerung erkannt -> nur noch über die Android-Einstellungen möglich
+        val askedBefore = getSharedPreferences("lfm3", MODE_PRIVATE).getBoolean("perms_asked", false)
+        val blocked = missing.filter { !shouldShowRequestPermissionRationale(it) }
+        if (askedBefore && blocked.isNotEmpty()) {
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Berechtigungen dauerhaft verweigert")
+                .setMessage("Für volle HTML-Fähigkeiten (Kamera, Mikrofon, Standort, Benachrichtigungen, Medien) bitte in den Android-Einstellungen alle Berechtigungen erteilen.\n\nFehlt: ${Permissions.missingLabels(this)}")
+                .setPositiveButton("Einstellungen öffnen") { _, _ ->
+                    try {
+                        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", packageName, null)))
+                    } catch (_: Throwable) {
+                        toast("Einstellungen konnten nicht geöffnet werden")
+                    }
+                }
+                .setNegativeButton("Später", null)
+                .show()
+            return
+        }
+        requestAllPerms()
     }
 
     // ---------------------------------------------------------------- Modell-Liste

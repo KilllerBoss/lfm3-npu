@@ -87,6 +87,17 @@
                     android:text="🧠 Modelle ▾" />
             </LinearLayout>
 
+            <!-- Berechtigungen: HTML-Apps dürfen Kamera, Mikrofon, Standort & Co. nutzen -->
+            <Button
+                android:id="@+id/btn_perms"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="-6dp"
+                android:gravity="center"
+                android:textSize="12sp"
+                android:text="🔒 Berechtigungen werden geprüft…" />
+
             <!-- Ausklappbare Modell-Liste -->
             <LinearLayout
                 android:id="@+id/model_panel"

@@ -88,6 +88,25 @@ Downscale images in JS (canvas, max ~1024px, JPEG quality ~0.8) before base64-en
 - Exactly one generation runs at a time: a NEW /v1/chat/completions request automatically CANCELS the previous one (its stream ends early with an error event). You may also POST /stop explicitly.
 - If no model is loaded, the API returns HTTP 503 {"error":{"message":"…"}} – catch this and tell the user to load a model in the launcher.
 
+=== DEVICE PERMISSIONS & NATIVE BRIDGE (window.Lfm) ===
+The host app pre-grants ALL permissions so HTML apps can use device features:
+- Camera & microphone: navigator.mediaDevices.getUserMedia({video:true, audio:true}) works. On first use Android shows its native permission dialog, then it just works (camera preview via <video>, audio recording).
+- Geolocation: navigator.geolocation.getCurrentPosition(...) works (native dialog on first use).
+- File input: <input type="file" accept="image/*"> opens the Android photo/file picker; capture attribute works too. Great for feeding photos to VISION models.
+- Vibration: navigator.vibrate(ms) works.
+- Downloads: <a href="blob:..." download> or data: URLs are saved into the phone's Downloads folder by the system download manager.
+- Extras beyond the web platform via the native bridge object window.Lfm:
+  Lfm.notify(title, body)          -> system notification; returns "ok" | "no-permission" | "error"
+  Lfm.vibrate(ms)                  -> vibrate; returns "ok" | "error"
+  Lfm.hasPermission("camera" | "microphone" | "location" | "notifications" | "media" | "bluetooth") -> true/false
+  Lfm.requestPermissions("camera,location") -> asks the user; results arrive as window event:
+      window.addEventListener("lfm3-permissions", e => { e.detail.camera === true ... })
+  Lfm.keepScreenOn(true | false)   -> keep the screen awake (good for long generations)
+  Lfm.share(text, title)           -> Android share sheet
+  Lfm.exitApp()                    -> close the fullscreen app, back to the launcher
+  Lfm.appVersion()                 -> host app version string
+- Guard bridge calls: window.Lfm exists in the fullscreen runner (it is undefined in normal desktop browsers – wrap calls in if (window.Lfm)).
+
 === UI/UX RULES (dark, mobile, touch) ===
 - Dark theme by default to match the host app: background #0B0F19, surfaces #121828, borders #252E45, text #F2F4FA, secondary text #9AA3B8, accent #7C5CFF, accent2 #37E5C8.
 - Mobile-first single column, touch targets >= 48px, font >= 16px in inputs (prevents zoom), no hover-only UI, support safe areas.
