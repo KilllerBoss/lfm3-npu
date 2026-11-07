@@ -50,12 +50,18 @@ class OrtEngine {
     private var zeroCaches: Map<String, OnnxTensor>? = null
     private var visionFeat: OnnxTensor? = null
 
-    private val cacheInputNames = ArrayList<String>()
+    private var cacheInputNames = ArrayList<String>()
     private var visionInputName: String? = null
     private var inputIdsName = "input_ids"
     private var attnName = "attention_mask"
     private var posName = "position_ids"
     private var keepName = "logits_to_keep"
+
+    // Welche Runtime-Inputs deklariert die Session wirklich? (unterschiedlich je Export)
+    private var sessionInputs: Set<String> = emptySet()
+    private var hasPosInput = true
+    private var hasKeepInput = true
+    private var hasCacheInputs = true
 
     var backendName: String = "CPU"
         private set
@@ -63,6 +69,12 @@ class OrtEngine {
         private set
 
     val isLoaded: Boolean get() = session != null
+
+    /**
+     * true = Ein-Pass-Modell ohne KV-Cache (z.B. d1-2B): kann keinen Text
+     * Token für Token generieren, sondern antwortet nur über Slot-Readouts.
+     */
+    val isSinglePass: Boolean get() = session != null && !hasCacheInputs
 
     // ------------------------------------------------------------------ Laden
 
@@ -100,19 +112,34 @@ class OrtEngine {
         session = s
         backendName = backend
 
-        // Inputs klassifizieren
+        // Inputs klassifizieren – NUR deklarierte Inputs werden später gefüttert
+        // (Exports unterscheiden sich: d1 hat z.B. KEIN logits_to_keep, dafür
+        // question_ids/slot_positions/video_features)
         cacheInputNames.clear()
         visionInputName = null
+        val inSet = s.inputNames.toSet()
+        sessionInputs = inSet
+        hasPosInput = inSet.contains(posName)
+        hasKeepInput = inSet.contains(keepName)
+        var videoName: String? = null
+        var featureName: String? = null
         for (name in s.inputNames) {
             val n = name.lowercase()
             when {
-                n == inputIdsName || n == attnName || n == posName || n == keepName -> { /* Runtime-Inputs */ }
+                n == inputIdsName || n == attnName || n == posName || n == keepName || n == "cache_position" -> { /* Runtime-Inputs */ }
                 n.contains("past") || n.contains("cache") || n.contains("conv") -> cacheInputNames.add(name)
-                n.contains("image") || n.contains("feature") || n.contains("pixel") -> visionInputName = name
-                else -> cacheInputNames.add(name) // unbekannt => als Cache behandeln
+                n.contains("image") || n.contains("pixel") -> if (visionInputName == null) visionInputName = name
+                n.contains("video") -> videoName = name
+                n.contains("feature") -> featureName = name
+                else -> { /* unbekannter Extra-Input (z.B. question_ids) – wird nicht gefüttert */ }
             }
         }
-        log("Cache-Inputs: ${cacheInputNames.size}, Vision-Input: $visionInputName")
+        // Vision-Input: Bild hat Vorrang vor Video/generischen Features
+        if (visionInputName == null) visionInputName = featureName ?: videoName
+        hasCacheInputs = cacheInputNames.isNotEmpty()
+        log("Cache-Inputs: ${cacheInputNames.size}, Vision-Input: $visionInputName, " +
+            "position_ids: $hasPosInput, logits_to_keep: $hasKeepInput")
+        if (!hasCacheInputs) log("Kein KV-Cache: Ein-Pass-Modell – keine Textgenerierung möglich")
 
         zeroCaches = buildZeroCaches(s)
         try {
@@ -172,6 +199,10 @@ class OrtEngine {
         log: (String) -> Unit
     ): GenStats {
         val s = session ?: throw IllegalStateException("Kein Modell geladen")
+        if (!hasCacheInputs) throw IllegalStateException(
+            "Dieses Modell ist ein Ein-Pass-Entscheidungsmodell (kein KV-Cache, z.B. d1-2B) " +
+            "und kann keinen Text Token für Token generieren. " +
+            "Bitte ein Chat-Modell laden: LFM3-VL-2B (Vision+JSON) oder LFM3-1.7B (Text).")
         val decoder = LfmTokenizer.StreamDecoder(tokenizer)
         val generated = ArrayList<Int>(cfg.maxTokens)
 
@@ -250,9 +281,14 @@ class OrtEngine {
         inputs[inputIdsName] = OnnxTensor.createTensor(env, LongBuffer.wrap(ids), longArrayOf(1, chunk.size.toLong()))
         val mask = LongArray(totalTokens) { 1L }
         inputs[attnName] = OnnxTensor.createTensor(env, LongBuffer.wrap(mask), longArrayOf(1, totalTokens.toLong()))
-        val pos = LongArray(chunk.size) { (posStart + it).toLong() }
-        inputs[posName] = OnnxTensor.createTensor(env, LongBuffer.wrap(pos), longArrayOf(1, chunk.size.toLong()))
-        inputs[keepName] = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(1L)), longArrayOf(1))
+        if (hasPosInput) {
+            val pos = LongArray(chunk.size) { (posStart + it).toLong() }
+            inputs[posName] = OnnxTensor.createTensor(env, LongBuffer.wrap(pos), longArrayOf(1, chunk.size.toLong()))
+        }
+        // logits_to_keep nur füttern, wenn das Modell ihn deklariert (d1 tut das nicht!)
+        if (hasKeepInput) {
+            inputs[keepName] = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(1L)), longArrayOf(1))
+        }
 
         if (lastResultHasCaches()) {
             for (name in cacheInputNames) {
@@ -264,6 +300,17 @@ class OrtEngine {
         }
         if (feedVision) {
             visionFeat?.let { vf -> visionInputName?.let { vn -> inputs[vn] = vf } }
+        }
+
+        // Sicherheitsnetz: niemals Inputs füttern, die die Session nicht deklariert
+        // (sonst: "Unknown input name ..." von ONNX Runtime)
+        val iter = inputs.entries.iterator()
+        while (iter.hasNext()) {
+            val en = iter.next()
+            if (en.key !in sessionInputs) {
+                if (en.value !== visionFeat) try { en.value.close() } catch (_: Throwable) {}
+                iter.remove()
+            }
         }
 
         // WICHTIG: erst laufen lassen, dann altes Ergebnis schließen – die Inputs

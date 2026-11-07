@@ -41,6 +41,7 @@ $modelLine
 Model catalog (kind values):
 $kinds
 - kind VISION/OMNI/DECISION models accept image input; AUDIO models are used as text models (audio input is NOT exposed by the API).
+- IMPORTANT: kind DECISION (d1-2B-ONNX) is a special SINGLE-PASS decision model WITHOUT text generation – it can NOT answer through /v1/chat/completions (HTTP 400). If the user loads it, tell them to load LFM3-VL-2B-ONNX instead; it handles the same vision+JSON tasks through the normal chat API.
 
 GET /status
   -> {"ok":true,"app":"LFM3 NPU","version":"…","backend":"QNN/HTP (NPU)","model":{"id":"…","name":"…","kind":"…","precision":"…","image_input":true|false},"generating":false}

@@ -10,7 +10,7 @@ und nutzen das on-device Modell über eine **OpenAI-kompatible lokale API**
 
 ## Download
 
-**v1.3.0**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
+**v1.3.1**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
 herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, arm64).
 
 ## Workflow
@@ -30,7 +30,8 @@ herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, a
   - `LFM3-VL-2B-ONNX` – Vision (Bild + Chat)
   - `LFM3-Audio-2B-ONNX` – Audio (Sprach-I/O über System-Speech)
   - `LFM3-Omni-2B-ONNX` – Omni (Text + Bild + Sprache)
-  - `d1-2B-ONNX` – strukturierte JSON-Entscheidungen (mit Vision)
+  - `d1-2B-ONNX` – Ein-Pass-Entscheidungsmodell (mit Vision, **kein Chat** –
+    kein KV-Cache im Export; für Vision+JSON über die Chat-API LFM3-VL-2B laden)
 - **Alle Quantisierungen:** q4 · q4f32 · q8 · q4f16 · q8f16 · fp16 · fp32
   (je nach Verfügbarkeit im jeweiligen HF-Repo)
 - **QNN/HTP-Pure-Backend** (`libQnnHtp.so`, `high_performance`) mit optionalem
@@ -41,8 +42,12 @@ herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, a
   - `POST /v1/chat/completions` – OpenAI-kompatibel (`messages`, `temperature`,
     `max_tokens`, `reasoning`, `stream`); Streaming als SSE
     (`data: {…choices[0].delta.content…}`, Ende `data: [DONE]`)
-  - Vision-Input über `image_url`-Parts (data-URL/base64) für VL/Omni/d1;
+  - Vision-Input über `image_url`-Parts (data-URL/base64) für VL/Omni;
     Thinking als `reasoning_content`
+  - Ein-Pass-Modelle (d1-2B, `single_pass:true` in `/status` & `/models`)
+    antworten auf `/v1/chat/completions` mit HTTP 400 + klarem Hinweis;
+    die Engine füttert nur Session-Inputs, die das Modell deklariert
+    (behebt „Unknown input name logits_to_keep“)
   - Neue Anfrage bricht die laufende Generierung automatisch ab (Auto-Cancel)
 - **HTML-Runner:** immersive Vollbild-WebView (JS, DOM-Storage,
   `<input type=file>` für Bild-Upload, `getUserMedia` nach Freigabe,

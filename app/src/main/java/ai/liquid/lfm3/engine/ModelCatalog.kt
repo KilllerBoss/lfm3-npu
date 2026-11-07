@@ -303,9 +303,10 @@ object ModelCatalog {
         ModelInfo(
             id = "d1-2B-ONNX",
             repo = "LiquidAI/d1-2B-ONNX",
-            displayName = "d1 2B (JSON-Entscheidungen)",
+            displayName = "d1 2B (Entscheidungen, kein Chat)",
             kind = ModelKind.DECISION,
-            desc = "Strukturierte JSON-Antworten für Agent-Aufgaben (mit Vision).",
+            desc = "⚠ Ein-Pass-Entscheidungsmodell (System One, kein KV-Cache): antwortet " +
+                "NICHT über die Chat-API. Für Chat/Vision/JSON-Boxen bitte LFM3-VL-2B laden.",
             needsVision = true,
             commonFiles = listOf(
                 FileSpec("tokenizer.json", 17908258L),

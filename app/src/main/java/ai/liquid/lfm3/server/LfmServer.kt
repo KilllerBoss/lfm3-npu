@@ -7,6 +7,7 @@ import android.util.Base64
 import ai.liquid.lfm3.BuildConfig
 import ai.liquid.lfm3.engine.EngineHost
 import ai.liquid.lfm3.engine.ModelCatalog
+import ai.liquid.lfm3.engine.ModelKind
 import ai.liquid.lfm3.engine.ModelManager
 import ai.liquid.lfm3.engine.ModelTasks
 import fi.iki.elonen.NanoHTTPD
@@ -69,6 +70,7 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
             .put("precision", EngineHost.currentPrecision)
             .put("image_input", model.needsVision)
             .put("audio_input", false)
+            .put("single_pass", EngineHost.engine?.isSinglePass == true)
         else JSONObject.NULL
         val o = JSONObject()
             .put("ok", true)
@@ -100,6 +102,7 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
                 .put("loaded", EngineHost.currentModel?.id == m.id)
                 .put("image_input", m.needsVision)
                 .put("audio_input", false)
+                .put("single_pass", m.kind == ModelKind.DECISION)
             if (ds != null) {
                 o.put("downloading", true).put("download_pct", ds.pct)
             }
@@ -138,6 +141,9 @@ class LfmServer(private val appCtx: Context, port: Int) : NanoHTTPD("127.0.0.1",
     private fun chatCompletions(session: IHTTPSession): Response {
         if (EngineHost.engine == null) return jsonError(503,
             "Kein Modell geladen. Öffne die LFM3-App und lade im Launcher ein Modell.")
+        if (EngineHost.engine?.isSinglePass == true) return jsonError(400,
+            "Das geladene Modell (d1-2B) ist ein Ein-Pass-Entscheidungsmodell ohne Textgenerierung " +
+            "(kein KV-Cache). Für die Chat-API bitte LFM3-VL-2B (Vision+JSON) oder LFM3-1.7B (Text) laden.")
 
         val req = try { JSONObject(readBody(session)) } catch (t: Throwable) {
             return jsonError(400, "Ungültiges JSON: ${t.message}")

@@ -141,6 +141,9 @@ object EngineHost {
             currentPrecision = prec.id
             loadError = null
             log("Geladen: ${model.displayName} [${prec.id}] via $backend")
+            if (e.isSinglePass) {
+                log("⚠ ${model.displayName} ist ein Ein-Pass-Modell: keine Chat-Textgenerierung möglich (d1 braucht System-One-Protokoll). Für die Chat-API LFM3-VL-2B laden.")
+            }
             onDone(null)
         } catch (t: Throwable) {
             loadError = t.message ?: t.toString()
@@ -170,6 +173,11 @@ object EngineHost {
 
         if (isGenerating) {
             onError("Es läuft bereits eine Generierung")
+            return executor.submit {}
+        }
+        if (e.isSinglePass) {
+            onError("Das geladene Modell ist ein Ein-Pass-Entscheidungsmodell (d1) ohne " +
+                "Textgenerierung. Für Chat/Vision/JSON bitte LFM3-VL-2B oder LFM3-1.7B laden.")
             return executor.submit {}
         }
 
@@ -275,6 +283,13 @@ object EngineHost {
         val model = currentModel
         if (e == null || tok == null) {
             onError("Kein Modell geladen")
+            return executor.submit {}
+        }
+        if (e.isSinglePass) {
+            onError("Das geladene Modell (d1-2B) ist ein Ein-Pass-Entscheidungsmodell ohne " +
+                "Textgenerierung (kein KV-Cache). Es antwortet nur über das spezielle " +
+                "System-One-Protokoll. Für die Chat-API bitte LFM3-VL-2B (Vision+JSON) " +
+                "oder LFM3-1.7B (Text) laden.")
             return executor.submit {}
         }
         if (isGenerating) {
