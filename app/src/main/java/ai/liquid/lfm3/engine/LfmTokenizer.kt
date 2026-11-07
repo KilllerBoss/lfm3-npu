@@ -86,7 +86,11 @@ class LfmTokenizer(tokenizerJson: String) {
                 b in 0xA1..0xAC -> b.toChar()
                 b in 0xAE..0xFF -> b.toChar()
                 else -> {
-                    cs.add(n.toChar())
+                    // v1.4.2-Fix: GPT-2 bytes_to_unicode bildet nicht-druckbare
+                    // Bytes auf U+0100+n ab (früher fälschlich U+0000+n -> Kollisionen
+                    // mit druckbaren Zeichen; Leerzeichen/Newlines wurden beim encode
+                    // verworfen und 'Ġ'/'Ċ' beim decode wörtlich ausgegeben).
+                    cs.add((0x100 + n).toChar())
                     n++
                     null
                 }
@@ -150,6 +154,12 @@ class LfmTokenizer(tokenizerJson: String) {
     /**
      * BPE über ein Segment; wenn [spansOut] gesetzt ist, wird pro Token der
      * Zeichen-Bereich im Originaltext ([segStart] + Offset) mitgeschrieben.
+     *
+     * v1.4.2-Fix (HF-Exaktheit): der Pre-Tokenizer-Regex läuft – wie in
+     * HuggingFace (Split vor ByteLevel) – auf dem ROHTEXT, nicht auf dem
+     * byte-gemappten Text. Auf dem gemappten Text verschoben sich die Grenzen
+     * ('ü' -> 'Ã'+'¼': '¼' ist \p{N} und trennte das Wort; '\n' -> 'Ċ' ist
+     * \p{L} und klebte an Wörter). Danach wird jedes Pretoken byte-gemappt.
      */
     private fun bpeSegmentWithSpans(
         s: String,
@@ -160,19 +170,55 @@ class LfmTokenizer(tokenizerJson: String) {
         segChars: Int?           // Zeichenanzahl des Segments
     ) {
         if (s.isEmpty()) return
-        val mapped = StringBuilder(s.length + 4)
-        val bytes = s.toByteArray(Charsets.UTF_8)
-        for (b in bytes) mapped.append(byteToUnicode[b.toInt() and 0xFF])
-        for (m in pretok.findAll(mapped)) {
-            val word = m.value
-            val direct = vocab[word]
-            if (direct != null) {
-                out.add(direct)
-                if (spansOut != null) addSpan(spansOut, m.range.first, m.range.last + 1, segStart, byteToChar, segChars, 1)
-                continue // ignore_merges
+        var byteOff = 0   // Byte-Offset im Segment (== Länge des gemappten Präfixes)
+        var charIdx = 0   // Zeichen-Index im Segment
+        for (m in pretok.findAll(s)) {
+            // Falls der Regex den Text nicht vollständig abdeckt: Lücke als
+            // eigene Pretoken verarbeiten (keine stillen Byte-Verluste).
+            if (m.range.first > charIdx) {
+                val gap = s.substring(charIdx, m.range.first)
+                byteOff = emitPretoken(gap, out, spansOut, segStart, byteToChar, segChars, byteOff)
             }
-            bpeWordWithSpans(word, out, spansOut, m.range.first, segStart, byteToChar, segChars)
+            byteOff = emitPretoken(m.value, out, spansOut, segStart, byteToChar, segChars, byteOff)
+            charIdx = m.range.last + 1
         }
+        if (charIdx < s.length) {
+            val gap = s.substring(charIdx)
+            emitPretoken(gap, out, spansOut, segStart, byteToChar, segChars, byteOff)
+        }
+    }
+
+    /**
+     * Mappt ein Rohtext-Pretoken byte-weise, prüft ignore_merges und führt
+     * sonst die BPE aus. Gibt den neuen Byte-Offset zurück.
+     */
+    private fun emitPretoken(
+        raw: String,
+        out: ArrayList<Int>,
+        spansOut: ArrayList<IntArray>?,
+        segStart: Int,
+        byteToChar: IntArray?,
+        segChars: Int?,
+        byteOffIn: Int
+    ): Int {
+        // WICHTIG: das Pretoken als GANZES nach UTF-8 encodieren. Pro-Zeichen-
+        // Encodierung zerstört Surrogat-Paare (Emoji): jedes Halbfahrzeug allein
+        // wird von Java durch '?' (0x3F) ersetzt -> falsche Bytes im Model-Input.
+        val wordSb = StringBuilder(raw.length)
+        for (b in raw.toByteArray(Charsets.UTF_8)) {
+            wordSb.append(byteToUnicode[b.toInt() and 0xFF])
+        }
+        val word = wordSb.toString()
+        val mStart = byteOffIn
+        val mEnd = byteOffIn + word.length // gemappte Länge == UTF-8-Bytelänge
+        val direct = vocab[word]
+        if (direct != null) {
+            out.add(direct)
+            if (spansOut != null) addSpan(spansOut, mStart, mEnd, segStart, byteToChar, segChars, 1)
+        } else {
+            bpeWordWithSpans(word, out, spansOut, mStart, segStart, byteToChar, segChars)
+        }
+        return mEnd
     }
 
     /** Span eines Tokens aus gemappten Byte-Positionen -> Original-Zeichenpositionen. */
@@ -199,20 +245,28 @@ class LfmTokenizer(tokenizerJson: String) {
         byteToChar: IntArray?,
         segChars: Int?
     ) {
-        if (spansOut == null) {
-            bpeWord(word, out)
-            return
-        }
+        // WICHTIG (v1.4.2): hier NIEMALS an bpeWord() delegieren, wenn spansOut
+        // null ist – bpeWord() ruft diese Methode wieder auf => endlose
+        // gegenseitige Rekursion => StackOverflowError bei jedem encode() mit
+        // einem Wort, das kein Einzel-Vokabular-Token ist (v1.4.0/v1.4.1-Bug).
+        // Stattdessen läuft die iterative BPE-Schleife immer hier, die Span-
+        // Berechnung wird schlicht übersprungen, wenn spansOut == null.
         if (word.isEmpty()) return
+        // 'word' ist bereits byte-gemappt (jedes Zeichen = 1 Byte gemappt) ->
+        // Aufteilung in Anfangsteile ist IDENTITÄT. Früher stand hier
+        // byteToUnicode[it and 0xFF] (Doppel-Mapping): mit der alten, falschen
+        // Bytetabelle zufällig idempotent, seit der Korrektur aber zerstörerisch
+        // ('Ł' U+0141 -> 'A' U+0041 usw.) -> Teile nicht im Vokabular -> Bytes
+        // wurden still verworfen ("Straße" -> "Strae").
         var parts: List<String> = if (word.length <= 128) {
-            word.chars().mapToObj { byteToUnicode[it and 0xFF]!! }.toList()
+            word.map { it.toString() }
         } else {
+            // Sehr lange Pretokens (z.B. CJK-Ketten) splitten, um O(n²) zu vermeiden
             val res = ArrayList<String>()
             var idx = 0
             while (idx < word.length) {
                 val end = minOf(idx + 64, word.length)
-                val chunk = word.substring(idx, end)
-                chunk.chars().mapToObj { byteToUnicode[it and 0xFF]!! }.forEach { res.add(it) }
+                for (c in word.substring(idx, end)) res.add(c.toString())
                 idx = end
             }
             res
@@ -242,13 +296,15 @@ class LfmTokenizer(tokenizerJson: String) {
             val id = vocab[p]
             if (id == null) { b += p.length; continue }
             out.add(id)
-            val c0 = if (byteToChar != null) {
-                val cA = byteToChar.getOrElse(b) { segChars ?: 0 }
-                val bEnd = b + p.length
-                val cB = if (bEnd >= byteToChar.size) (segChars ?: cA) else byteToChar[bEnd]
-                segStart + cA to segStart + cB
-            } else segStart + b to segStart + b + p.length
-            spansOut.add(intArrayOf(c0.first, c0.second))
+            if (spansOut != null) {
+                val c0 = if (byteToChar != null) {
+                    val cA = byteToChar.getOrElse(b) { segChars ?: 0 }
+                    val bEnd = b + p.length
+                    val cB = if (bEnd >= byteToChar.size) (segChars ?: cA) else byteToChar[bEnd]
+                    segStart + cA to segStart + cB
+                } else segStart + b to segStart + b + p.length
+                spansOut.add(intArrayOf(c0.first, c0.second))
+            }
             b += p.length
         }
     }
@@ -284,10 +340,14 @@ class LfmTokenizer(tokenizerJson: String) {
                     }
                 }
                 if (h != null) break
-                val bytes = text[i].toString().toByteArray(Charsets.UTF_8)
+                // Pro CODE POINT (nicht pro UTF-16-Char): Surrogat-Paare (Emoji)
+                // sind 4 UTF-8-Bytes und dürfen nicht einzeln encodiert werden.
+                val cp = Character.codePointAt(text, i)
+                val chars = Character.toChars(cp)
+                val bytes = String(chars).toByteArray(Charsets.UTF_8)
                 repeat(bytes.size) { byteToChar.add(i - segStart) }
-                seg.append(text[i])
-                i++
+                seg.append(chars)
+                i += chars.size
             }
             val b2c = byteToChar.toIntArray()
             bpeSegmentWithSpans(seg.toString(), ids, startsEndsToList(starts, ends), segStart, b2c, seg.length)
@@ -338,12 +398,11 @@ class LfmTokenizer(tokenizerJson: String) {
         return text
     }
 
-    private fun bpeWord(word: String, out: ArrayList<Int>) {
-        bpeWordWithSpans(word, out, null, 0, 0, null, null)
-    }
-
     /** Token-ID -> Token-String (Vokabular-Rückweg). */
     fun tokenForId(id: Int): String? = invVocab[id]
+
+    /** Token-String -> ID (Vokabular-Vorweg; null, wenn unbekannt). */
+    fun idFor(token: String): Int? = vocab[token]
 
     /**
      * Inkrementeller Decoder: wandelt neue Token-IDs in Text um und puffert

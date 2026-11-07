@@ -462,8 +462,8 @@ object EngineHost {
                 "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
             }
             return "Stacküberlauf im Engine-Thread (${t.message ?: "unbekannte Tiefe"}). " +
-                "Modell-Run bricht ab, bevor er die NPU erreicht – bitte neue Version installieren " +
-                "(v1.4.1 nutzt 128 MB Engine-Stack). Frames: ${frames.ifEmpty { "keine (nativer Überlauf)" }}"
+                "Bitte v1.4.2 installieren – dort ist die Tokenizer-Endlosschleife (bpeWord) behoben, " +
+                "die jeden Stack zum Überlaufen bringt. Frames: ${frames.ifEmpty { "keine (nativer Überlauf)" }}"
         }
         return t.message ?: t.toString()
     }

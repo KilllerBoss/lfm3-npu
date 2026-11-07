@@ -10,8 +10,17 @@ und nutzen das on-device Modell über eine **OpenAI-kompatible lokale API**
 
 ## Download
 
-**v1.4.1**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
+**v1.4.2**: https://github.com/KilllerBoss/lfm3-npu/releases/latest – APK
 herunterladen, öffnen, „Unbekannte Apps erlauben“ (mindestens Android 12, arm64).
+
+> **v1.4.2 (wichtig):** Tokenizer-Korrektur. v1.4.0/v1.4.1 brachen bei jedem
+> `encode()` mit einem Wort, das kein Einzel-Vokabular-Token ist, mit
+> „Stacküberlauf … stack size 4107KB/129MB“ ab (endlose Rekursion
+> `bpeWord ↔ bpeWordWithSpans`). Zusätzlich waren Byte-Tabelle und
+> Pre-Tokenizer nicht HF-konform (Leerzeichen/Newlines wurden beim Encode
+> verworfen, `'Ġ'` beim Decode wörtlich ausgegeben, Umlaute falsch gesplittet).
+> Der Tokenizer ist jetzt id-für-id gegen die echte HF-Tokenisierung verifiziert
+> (Unit-Tests in `app/src/test/…/LfmTokenizerTest.kt` und `RealTokenizerCheck.kt`).
 
 ## Workflow
 

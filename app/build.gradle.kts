@@ -11,8 +11,8 @@ android {
         applicationId = "ai.liquid.lfm3"
         minSdk = 31
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.4.1"
+        versionCode = 9
+        versionName = "1.4.2"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -70,4 +70,8 @@ dependencies {
 
     // Lokaler HTTP-Server für die HTML-Apps (OpenAI-kompatible API)
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+
+    // JVM-Unit-Tests (Tokenizer-Logik ist android-frei testbar)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
