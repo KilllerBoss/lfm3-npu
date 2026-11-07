@@ -217,12 +217,14 @@ class OrtEngine {
         while (true) {
             if (cancel.get()) { decodeMs = System.currentTimeMillis() - decodeStart; break }
             if (nextId in ChatTemplate.STOP_IDS) break
-            if (nextId == ChatTemplate.TOKEN_THINK_START || nextId == ChatTemplate.TOKEN_THINK_END) {
-                onSpecial(nextId)
-            }
             generated.add(nextId)
-            val text = decoder.push(nextId)
-            if (text.isNotEmpty()) onDelta(text)
+            if (nextId == ChatTemplate.TOKEN_THINK_START || nextId == ChatTemplate.TOKEN_THINK_END) {
+                // Steuer-Tokens steuern nur den Denk-Modus, erscheinen nicht als Text
+                onSpecial(nextId)
+            } else {
+                val text = decoder.push(nextId)
+                if (text.isNotEmpty()) onDelta(text)
+            }
 
             if (generated.size >= cfg.maxTokens) { truncated = true; break }
             if (inputIds.size + generated.size >= cfg.maxContext) { truncated = true; break }
