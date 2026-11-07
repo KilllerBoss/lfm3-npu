@@ -62,6 +62,8 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
 
     private fun key(m: ModelInfo, p: String) = "${m.id}|$p"
 
+    private fun posOf(m: ModelInfo): Int = ModelCatalog.MODELS.indexOfFirst { it.id == m.id }
+
     // ---------------------------------------------------------------- Listener-Implementierung
 
     override fun onCyclePrecision(model: ModelInfo, current: String): String {
@@ -116,22 +118,30 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
         val ds = DownloadState()
         downloads[k] = ds
         logLine("Download startet: ${model.displayName} [${prec.id}] (${ModelCatalog.humanBytes(need)})")
-        adapter.notifyDataSetChanged()
+        adapter.notifyItemChanged(posOf(model))
 
         val ctx = requireContext().applicationContext
         dlExecutor.submit {
+            var lastUi = 0L
             try {
                 ModelManager.download(ctx, model, prec, ds.cancel) { p ->
                     val total = p.totalSize.coerceAtLeast(1)
                     ds.done = p.totalDone
                     ds.total = total
                     ds.pct = ((p.totalDone * 100) / total).toInt().coerceIn(0, 100)
-                    main.post { adapter.notifyDataSetChanged() }
+                    // Nur alle 250 ms UI anfassen und NUR das eine Item neu binden:
+                    // notifyDataSetChanged() bei jedem Fortschritts-Tick macht die
+                    // Liste ruckelig und stört das Scrollen während Downloads.
+                    val now = System.currentTimeMillis()
+                    if (now - lastUi > 250) {
+                        lastUi = now
+                        main.post { adapter.notifyItemChanged(posOf(model)) }
+                    }
                 }
                 main.post {
                     downloads.remove(k)
                     logLine("Fertig: ${model.displayName} [${prec.id}]")
-                    adapter.notifyDataSetChanged()
+                    adapter.notifyItemChanged(posOf(model))
                     refreshStorage()
                     toast("Modell heruntergeladen – kann jetzt geladen werden")
                 }
@@ -140,7 +150,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
                     downloads.remove(k)
                     val msg = if (t is InterruptedException) "abgebrochen" else "Fehler: ${t.message}"
                     logLine("Download ${model.displayName} [${prec.id}] $msg")
-                    adapter.notifyDataSetChanged()
+                    adapter.notifyItemChanged(posOf(model))
                     refreshStorage()
                 }
             }
@@ -149,7 +159,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
 
     private fun load(model: ModelInfo, prec: ai.liquid.lfm3.engine.PrecisionInfo) {
         loadingModelId = model.id
-        adapter.notifyDataSetChanged()
+        adapter.notifyItemChanged(posOf(model))
         val ts = SimpleDateFormat("HH:mm:ss", Locale.GERMANY).format(Date())
         EngineHost.loadModel(requireContext().applicationContext, model, prec,
             log = { line ->
@@ -158,7 +168,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
             onDone = { err ->
                 main.post {
                     loadingModelId = null
-                    adapter.notifyDataSetChanged()
+                    adapter.notifyItemChanged(posOf(model))
                     if (err == null) {
                         toast("Geladen: ${model.displayName} · Backend: ${EngineHost.backendLabel}")
                     } else {

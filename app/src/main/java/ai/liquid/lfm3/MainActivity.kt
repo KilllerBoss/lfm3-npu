@@ -12,6 +12,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import androidx.fragment.app.Fragment
 import ai.liquid.lfm3.ui.AgentFragment
 import ai.liquid.lfm3.ui.ChatFragment
@@ -29,6 +32,27 @@ class MainActivity : AppCompatActivity() {
             setContentView(R.layout.activity_main)
 
             val nav = findViewById<BottomNavigationView>(R.id.bottom_nav)
+
+            // Edge-to-Edge (targetSdk 35 erzwingt das): Statusleiste oben und
+            // Gesture-Zone/Tastatur unten manuell berücksichtigen. Ohne dieses
+            // Handling sind Listenenden hinter Nav-Leiste/Gesture-Zone versteckt.
+            val root = findViewById<ViewGroup>(R.id.root)
+            ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+                val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+                val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+                v.updatePadding(top = bars.top)
+                if (ime.bottom > bars.bottom) {
+                    // Tastatur offen: Inhalt über die Tastatur heben
+                    v.updatePadding(bottom = ime.bottom)
+                    nav.updatePadding(bottom = 0)
+                } else {
+                    v.updatePadding(bottom = 0)
+                    // Gesture-Zone/Nav-Bar: Unterkante der BottomNav frei halten
+                    nav.updatePadding(bottom = bars.bottom)
+                }
+                WindowInsetsCompat.CONSUMED
+            }
+
             if (savedInstanceState == null) {
                 switchTo(ChatFragment())
             }
@@ -61,7 +85,10 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetTextI18n")
     private fun showCrashBanner(crashText: String) {
         try {
-            val root = findViewById<ViewGroup>(R.id.fragment_container)
+            // In den root-LinearLayout (statt in fragment_container) einfügen,
+            // damit das Banner den Inhalt NACH UNTEN SCHIEBT statt zu überdecken
+            // (ein überdeckendes klickbares Banner frisst sonst Touch-Events).
+            val root = findViewById<ViewGroup>(R.id.root)
             val banner = TextView(this).apply {
                 setTextColor(Color.parseColor("#FFD9D9"))
                 setBackgroundColor(Color.parseColor("#AA5A1F1F"))
