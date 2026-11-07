@@ -33,6 +33,14 @@ class AgentFragment : Fragment(R.layout.fragment_agent) {
     private var image: Bitmap? = null
     @Volatile private var running = false
 
+    /** Führt block auf dem UI-Thread aus, ohne bei Detached-State zu crashen:
+     *  Activity wird gecaptured (bleibt beim Tab-Wechsel dieselbe) und im Block
+     *  sind requireContext()/requireActivity() verboten (werden hier nicht benutzt). */
+    private fun ui(block: () -> Unit) {
+        val act = activity ?: return
+        act.runOnUiThread { try { block() } catch (_: Throwable) {} }
+    }
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         EngineHost.init(requireContext())
@@ -67,24 +75,29 @@ class AgentFragment : Fragment(R.layout.fragment_agent) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 61 && resultCode == Activity.RESULT_OK) {
             val uri = data?.data ?: return
+            // Kontexte JETZT cachen (Fragment ist hier noch attached) -
+            // im Hintergrund-Thread danach nicht mehr requireContext() anfassen.
+            val appCtx = requireContext().applicationContext
             try {
-                requireContext().contentResolver.takePersistableUriPermission(
+                appCtx.contentResolver.takePersistableUriPermission(
                     uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             } catch (_: Throwable) {}
             Thread {
                 try {
                     val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                    val bmp = requireContext().contentResolver.openInputStream(uri)?.use {
+                    val bmp = appCtx.contentResolver.openInputStream(uri)?.use {
                         BitmapFactory.decodeStream(it, null, opts)
                     }
                     image = bmp
-                    requireActivity().runOnUiThread {
+                    ui {
                         imgPreview.visibility = if (bmp != null) View.VISIBLE else View.GONE
                         imgPreview.setImageBitmap(bmp)
                     }
                 } catch (t: Throwable) {
-                    requireActivity().runOnUiThread {
-                        Toast.makeText(requireContext(), "Bild konnte nicht geladen werden", Toast.LENGTH_SHORT).show()
+                    ui {
+                        context?.let { ctx ->
+                            Toast.makeText(ctx, "Bild konnte nicht geladen werden", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             }.start()
@@ -115,7 +128,7 @@ class AgentFragment : Fragment(R.layout.fragment_agent) {
             try {
                 for (q in questions) {
                     idx++
-                    requireActivity().runOnUiThread { tvState.text = "$idx/${questions.size}: $q" }
+                    ui { tvState.text = "$idx/${questions.size}: $q" }
                     val isJsonTask = EngineHost.currentModel?.kind == ai.liquid.lfm3.engine.ModelKind.DECISION
                     val prompt = if (isJsonTask) {
                         "$q\n\nAntworte ausschließlich als JSON-Objekt mit den Feldern " +
@@ -144,14 +157,14 @@ class AgentFragment : Fragment(R.layout.fragment_agent) {
                     } else {
                         "Frage: $q\n${out.replace(Regex("\\s+"), " ").take(500)}"
                     }
-                    requireActivity().runOnUiThread { adapter.append(line) }
+                    ui { adapter.append(line) }
                 }
-                requireActivity().runOnUiThread {
+                ui {
                     tvState.text = "Fertig ($idx Antworten)"
                     running = false
                 }
             } catch (t: Throwable) {
-                requireActivity().runOnUiThread {
+                ui {
                     tvState.text = "Fehler: ${t.message}"
                     adapter.append("Fehler: ${t.message}")
                     running = false

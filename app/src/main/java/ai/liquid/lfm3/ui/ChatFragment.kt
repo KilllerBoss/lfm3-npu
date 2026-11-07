@@ -49,6 +49,14 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
     private var recognizer: SpeechRecognizer? = null
     private var listening = false
 
+    /** UI-Thread-Helper ohne Crash-Risiko bei Detached-State (Tab-Wechsel
+     *  während laufender Generierung): Activity wird gecaptured, im Block
+     *  sind requireContext()/requireActivity() nicht erlaubt. */
+    private fun ui(block: () -> Unit) {
+        val act = activity ?: return
+        act.runOnUiThread { try { block() } catch (_: Throwable) {} }
+    }
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         EngineHost.init(requireContext())
@@ -96,6 +104,7 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
     }
 
     private fun refreshHeader() {
+        if (!isAdded || !this::tvModel.isInitialized) return
         tvModel.text = EngineHost.activeModelLabel
         tvBackend.text = if (EngineHost.isModelLoaded) {
             "Backend: ${EngineHost.backendLabel}"
@@ -140,7 +149,7 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
                 scheduleUiTick(botIndex)
             },
             onStats = { stats ->
-                requireActivity().runOnUiThread {
+                ui {
                     val s = String.format(
                         Locale.GERMANY,
                         "%d Tokens · %.1f Tok/s (Prefill %d ms)",
@@ -153,10 +162,10 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
                 }
             },
             onError = { err ->
-                requireActivity().runOnUiThread {
+                ui {
                     if (botIndex < history.size) {
                         history[botIndex].text =
-                            getString(R.string.error, err)
+                            if (isAdded) getString(R.string.error, err) else "Fehler: $err"
                         adapter.notifyItemChangedSafe(botIndex)
                     }
                     refreshHeader()
@@ -211,15 +220,17 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_PICK && resultCode == Activity.RESULT_OK) {
             val uri = data?.data ?: return
+            // Kontexte JETZT cachen (noch attached) - im Thread danach kein requireContext()
+            val appCtx = requireContext().applicationContext
             try {
-                requireContext().contentResolver.takePersistableUriPermission(
+                appCtx.contentResolver.takePersistableUriPermission(
                     uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             } catch (_: Throwable) {}
             pendingImageUri = uri
             Thread {
                 try {
                     val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    requireContext().contentResolver.openInputStream(uri)?.use {
+                    appCtx.contentResolver.openInputStream(uri)?.use {
                         BitmapFactory.decodeStream(it, null, opts)
                     }
                     var sample = 1
@@ -228,16 +239,20 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
                         sample *= 2
                     }
                     val opts2 = BitmapFactory.Options().apply { inSampleSize = sample }
-                    val bmp = requireContext().contentResolver.openInputStream(uri)?.use {
+                    val bmp = appCtx.contentResolver.openInputStream(uri)?.use {
                         BitmapFactory.decodeStream(it, null, opts2)
                     }
                     pendingImage = bmp
-                    requireActivity().runOnUiThread {
-                        Toast.makeText(requireContext(), "Bild angehängt", Toast.LENGTH_SHORT).show()
+                    ui {
+                        context?.let { ctx ->
+                            Toast.makeText(ctx, "Bild angehängt", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 } catch (t: Throwable) {
-                    requireActivity().runOnUiThread {
-                        Toast.makeText(requireContext(), "Bild konnte nicht geladen werden", Toast.LENGTH_SHORT).show()
+                    ui {
+                        context?.let { ctx ->
+                            Toast.makeText(ctx, "Bild konnte nicht geladen werden", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             }.start()
@@ -313,8 +328,12 @@ class ChatFragment : Fragment(R.layout.fragment_chat) {
 
     private fun finishListening() {
         listening = false
-        btnMic.setImageResource(R.drawable.ic_mic)
-        etInput.hint = getString(R.string.hint_message)
+        // Kann aus SpeechRecognizer-Callbacks nach dem Detach aufgerufen werden:
+        // View-Zugriffe nur wenn initialisiert, getString nur wenn attached.
+        if (this::btnMic.isInitialized) btnMic.setImageResource(R.drawable.ic_mic)
+        if (this::etInput.isInitialized) {
+            etInput.hint = if (isAdded) getString(R.string.hint_message) else ""
+        }
         try { recognizer?.destroy() } catch (_: Throwable) {}
         recognizer = null
     }

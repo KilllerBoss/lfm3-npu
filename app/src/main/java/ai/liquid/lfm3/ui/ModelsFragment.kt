@@ -1,6 +1,8 @@
 package ai.liquid.lfm3.ui
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
@@ -22,6 +24,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Modell-Verwaltung: alle LFM3-Varianten mit allen Präzisionen,
  * Download (mit Fortschritt/Abbruch), Laden in die Engine, Löschen (Langer Druck).
+ *
+ * Lifecycle-Regeln (Fix für "Fragment not attached to a context"):
+ * - Download-/Lade-Zustand liegt im companion object und überlebt Tab-Wechsel.
+ * - Kein requireContext() in Callbacks, die nach onDetach laufen können.
+ * - UI-Updates gehen über activeAdapter (der aktuell sichtbaren Liste).
  */
 class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listener {
 
@@ -32,14 +39,20 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
         @Volatile var total: Long = 1
     }
 
+    companion object {
+        // Überlebt Fragment-Wechsel: Downloads laufen im Application-Kontext weiter;
+        // beim Zurückkehren in den Tab wird der laufende Stand wieder angezeigt.
+        private val downloads = ConcurrentHashMap<String, DownloadState>()
+        @Volatile private var loadingModelId: String? = null
+        private val dlExecutor = Executors.newSingleThreadExecutor { Thread(it, "lfm3-download") }
+        private val main = Handler(Looper.getMainLooper())
+        @Volatile private var activeAdapter: ModelsAdapter? = null
+
+        private fun posOf(m: ModelInfo): Int = ModelCatalog.MODELS.indexOfFirst { it.id == m.id }
+    }
+
     private lateinit var adapter: ModelsAdapter
     private lateinit var tvStorage: TextView
-
-    private val downloads = ConcurrentHashMap<String, DownloadState>()
-    private val dlExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "lfm3-download")
-    }
-    @Volatile private var loadingModelId: String? = null
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -50,19 +63,22 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
         val rv = view.findViewById<RecyclerView>(R.id.rv_models)
         rv.layoutManager = LinearLayoutManager(requireContext())
         rv.adapter = adapter
+        activeAdapter = adapter
 
         refreshStorage()
     }
 
     private fun refreshStorage() {
-        val used = ModelManager.diskUsedBytes(requireContext())
-        val free = ModelManager.diskFreeBytes(requireContext())
-        tvStorage.text = "Belegt: ${ModelCatalog.humanBytes(used)} · Frei: ${ModelCatalog.humanBytes(free)}"
+        // CRASH-FIX: früher requireContext() -> IllegalStateException nach Tab-Wechsel
+        val ctx = context ?: return
+        val used = ModelManager.diskUsedBytes(ctx)
+        val free = ModelManager.diskFreeBytes(ctx)
+        if (this::tvStorage.isInitialized) {
+            tvStorage.text = "Belegt: ${ModelCatalog.humanBytes(used)} · Frei: ${ModelCatalog.humanBytes(free)}"
+        }
     }
 
     private fun key(m: ModelInfo, p: String) = "${m.id}|$p"
-
-    private fun posOf(m: ModelInfo): Int = ModelCatalog.MODELS.indexOfFirst { it.id == m.id }
 
     // ---------------------------------------------------------------- Listener-Implementierung
 
@@ -94,13 +110,16 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
 
     override fun onDelete(model: ModelInfo, precId: String) {
         val prec = model.precision(precId) ?: return
+        // Application-Kontext für den Dialog-Callback cachen: Das Fragment kann
+        // detached sein, wenn der User bei offenem Dialog den Tab wechselt.
+        val appCtx = requireContext().applicationContext
         androidx.appcompat.app.AlertDialog.Builder(requireContext())
             .setTitle("Löschen")
             .setMessage("${model.displayName} [$precId] wirklich löschen?")
             .setPositiveButton(R.string.delete) { _, _ ->
-                ModelManager.delete(requireContext(), model, prec)
+                ModelManager.delete(appCtx, model, prec)
                 toast("Gelöscht: ${model.displayName} $precId")
-                adapter.notifyDataSetChanged()
+                activeAdapter?.notifyDataSetChanged()
                 refreshStorage()
             }
             .setNegativeButton(R.string.cancel, null)
@@ -118,7 +137,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
         val ds = DownloadState()
         downloads[k] = ds
         logLine("Download startet: ${model.displayName} [${prec.id}] (${ModelCatalog.humanBytes(need)})")
-        adapter.notifyItemChanged(posOf(model))
+        activeAdapter?.notifyItemChanged(posOf(model))
 
         val ctx = requireContext().applicationContext
         dlExecutor.submit {
@@ -129,19 +148,17 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
                     ds.done = p.totalDone
                     ds.total = total
                     ds.pct = ((p.totalDone * 100) / total).toInt().coerceIn(0, 100)
-                    // Nur alle 250 ms UI anfassen und NUR das eine Item neu binden:
-                    // notifyDataSetChanged() bei jedem Fortschritts-Tick macht die
-                    // Liste ruckelig und stört das Scrollen während Downloads.
+                    // Nur alle 250 ms UI anfassen und NUR das eine Item neu binden.
                     val now = System.currentTimeMillis()
                     if (now - lastUi > 250) {
                         lastUi = now
-                        main.post { adapter.notifyItemChanged(posOf(model)) }
+                        main.post { activeAdapter?.notifyItemChanged(posOf(model)) }
                     }
                 }
                 main.post {
                     downloads.remove(k)
                     logLine("Fertig: ${model.displayName} [${prec.id}]")
-                    adapter.notifyItemChanged(posOf(model))
+                    activeAdapter?.notifyItemChanged(posOf(model))
                     refreshStorage()
                     toast("Modell heruntergeladen – kann jetzt geladen werden")
                 }
@@ -150,7 +167,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
                     downloads.remove(k)
                     val msg = if (t is InterruptedException) "abgebrochen" else "Fehler: ${t.message}"
                     logLine("Download ${model.displayName} [${prec.id}] $msg")
-                    adapter.notifyItemChanged(posOf(model))
+                    activeAdapter?.notifyItemChanged(posOf(model))
                     refreshStorage()
                 }
             }
@@ -159,7 +176,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
 
     private fun load(model: ModelInfo, prec: ai.liquid.lfm3.engine.PrecisionInfo) {
         loadingModelId = model.id
-        adapter.notifyItemChanged(posOf(model))
+        activeAdapter?.notifyItemChanged(posOf(model))
         val ts = SimpleDateFormat("HH:mm:ss", Locale.GERMANY).format(Date())
         EngineHost.loadModel(requireContext().applicationContext, model, prec,
             log = { line ->
@@ -168,7 +185,7 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
             onDone = { err ->
                 main.post {
                     loadingModelId = null
-                    adapter.notifyItemChanged(posOf(model))
+                    activeAdapter?.notifyItemChanged(posOf(model))
                     if (err == null) {
                         toast("Geladen: ${model.displayName} · Backend: ${EngineHost.backendLabel}")
                     } else {
@@ -203,16 +220,15 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
 
     // ---------------------------------------------------------------- Helpers
 
-    private val main = android.os.Handler(android.os.Looper.getMainLooper())
-
     private fun logLine(line: String) {
-        // kompakt im Storage-Feld (keine eigene Liste nötig)
+        android.util.Log.i("LFM3", line)
+        // View-Zugriff nur, wenn die View existiert (Fragment kann detached sein)
+        if (!this::tvStorage.isInitialized) return
         val cur = tvStorage.text.toString()
         tvStorage.text = line
         tvStorage.postDelayed({
             if (tvStorage.text == line) refreshStorage()
         }, 4000)
-        android.util.Log.i("LFM3", line)
         if (cur.isNotEmpty() && cur != line && !cur.startsWith("Belegt:")) {
             // vorherige Zeile verwerfen (bewusst minimal)
         }
@@ -223,7 +239,8 @@ class ModelsFragment : Fragment(R.layout.fragment_models), ModelsAdapter.Listene
     }
 
     override fun onDestroyView() {
+        if (activeAdapter === adapter) activeAdapter = null
         super.onDestroyView()
-        // Downloads laufen bewusst weiter (Application-Kontext)
+        // Downloads laufen bewusst weiter (Application-Kontext + companion object)
     }
 }

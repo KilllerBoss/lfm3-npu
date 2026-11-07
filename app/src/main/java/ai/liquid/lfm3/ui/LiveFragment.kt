@@ -34,6 +34,18 @@ class LiveFragment : Fragment(R.layout.fragment_live) {
     private var ttsReady = false
     private var running = false
 
+    /** UI-Thread-Helper ohne Crash-Risiko bei Detached-State (Tab-Wechsel mitten
+     *  im Sprach-Loop): Activity wird gecaptured, Fehler im Block werden
+     *  geschluckt statt die App zu töten. */
+    private fun ui(block: () -> Unit) {
+        val act = activity ?: return
+        act.runOnUiThread { try { block() } catch (_: Throwable) {} }
+    }
+
+    /** Detach-sicheres getString (liefert "", wenn das Fragment nicht mehr
+     *  attached ist - vorher würde getString() hier crashen). */
+    private fun s(id: Int): String = if (isAdded) getString(id) else ""
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         EngineHost.init(requireContext())
@@ -72,25 +84,30 @@ class LiveFragment : Fragment(R.layout.fragment_live) {
         try { recognizer?.destroy() } catch (_: Throwable) {}
         recognizer = null
         try { tts?.stop() } catch (_: Throwable) {}
-        btnTalk.text = getString(R.string.live_start)
-        tvState.text = getString(R.string.live_state_idle)
+        if (this::btnTalk.isInitialized) btnTalk.text = s(R.string.live_start)
+        if (this::tvState.isInitialized) tvState.text = s(R.string.live_state_idle)
     }
 
     private fun listen() {
-        if (!running) return
-        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.RECORD_AUDIO)
+        if (!running || !isAdded) { running = false; return }
+        // CRASH-FIX: kein requireContext()/requireActivity() mehr - listen() wird
+        // auch aus TTS-/Erkennungs-Callbacks aufgerufen, die nach dem Tab-Wechsel
+        // laufen können.
+        val ctx = context ?: run { running = false; return }
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(requireActivity(),
+            val act = activity ?: run { running = false; return }
+            ActivityCompat.requestPermissions(act,
                 arrayOf(Manifest.permission.RECORD_AUDIO), 51)
             return
         }
-        if (!SpeechRecognizer.isRecognitionAvailable(requireContext())) {
+        if (!SpeechRecognizer.isRecognitionAvailable(ctx)) {
             tvState.text = "Spracherkennung nicht verfügbar"
             stopAll()
             return
         }
-        tvState.text = getString(R.string.live_state_listening)
-        recognizer = SpeechRecognizer.createSpeechRecognizer(requireContext()).apply {
+        tvState.text = s(R.string.live_state_listening)
+        recognizer = SpeechRecognizer.createSpeechRecognizer(ctx).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onResults(results: Bundle) {
                     val txt = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -112,7 +129,7 @@ class LiveFragment : Fragment(R.layout.fragment_live) {
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {
-                    if (running) tvState.text = getString(R.string.live_state_thinking)
+                    if (running) tvState.text = s(R.string.live_state_thinking)
                 }
                 override fun onPartialResults(partialResults: Bundle?) {}
                 override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -127,7 +144,8 @@ class LiveFragment : Fragment(R.layout.fragment_live) {
     }
 
     private fun think(userText: String) {
-        tvState.text = getString(R.string.live_state_thinking)
+        if (!isAdded) { running = false; return }
+        tvState.text = s(R.string.live_state_thinking)
         val act = activity ?: return
 
         val hist = ArrayList<EngineHost.Msg>()
@@ -142,14 +160,14 @@ class LiveFragment : Fragment(R.layout.fragment_live) {
                 synchronized(sb) { sb.append(delta) }
             },
             onStats = {
-                act.runOnUiThread {
+                ui {
                     val answer = synchronized(sb) { sb.toString() }.trim()
                     if (answer.isEmpty()) answer_fallback()
                     else speak(answer)
                 }
             },
             onError = { err ->
-                act.runOnUiThread {
+                ui {
                     adapter.append("Fehler: $err")
                     tvState.text = "Fehler – nochmal tippen"
                 }
@@ -163,13 +181,15 @@ class LiveFragment : Fragment(R.layout.fragment_live) {
     }
 
     private fun speak(text: String) {
+        // Tab gewechselt / Fragment weg: Sprach-Loop sauber stoppen
+        if (!isAdded) { running = false; return }
         val short = text.replace(Regex("\\s+"), " ").take(600)
         adapter.append("Bot: $short")
-        tvState.text = getString(R.string.live_state_speaking)
+        tvState.text = s(R.string.live_state_speaking)
         if (ttsReady) {
             tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onDone(utteranceId: String?) {
-                    activity?.runOnUiThread {
+                    ui {
                         if (running) listen()
                     }
                 }
